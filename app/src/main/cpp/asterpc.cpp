@@ -446,8 +446,36 @@ static std::string mapPeImage(const std::vector<uint8_t>& b) {
     // Imports are parsed and IAT entries receive non-executable placeholder thunk addresses.
     // These addresses are diagnostic only; no DLL or Windows API is invoked.
     std::vector<std::string> importDetails;
-    uint32_t importSymbols=0,importDllCount=0;
+    uint32_t importSymbols=0,importDllCount=0,recognizedApis=0;
     constexpr uint64_t importStubBase=0x0000700000000000ULL;
+    auto isKnownApi=[](const std::string& dll,const std::string& api)->bool {
+        std::string module=dll;
+        std::transform(module.begin(),module.end(),module.begin(),
+                       [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+        if(module=="kernel32.dll" || module=="kernelbase.dll") {
+            static const char* names[]={"GetTickCount","GetCurrentProcessId","GetCurrentThreadId",
+                "GetVersion","IsDebuggerPresent","GetCommandLineA","GetCommandLineW",
+                "GetLastError","SetLastError","ExitProcess","GetModuleHandleA",
+                "GetModuleHandleW","GetProcAddress","VirtualAlloc","VirtualFree",
+                "HeapAlloc","HeapFree","Sleep","QueryPerformanceCounter",
+                "GetSystemTimeAsFileTime","GetStartupInfoA","GetStartupInfoW"};
+            for(const char* name:names) if(api==name) return true;
+        }
+        if(module=="ntdll.dll") {
+            static const char* names[]={"RtlGetVersion","RtlExitUserProcess","NtQueryInformationProcess"};
+            for(const char* name:names) if(api==name) return true;
+        }
+        if(module=="user32.dll") {
+            static const char* names[]={"GetSystemMetrics","GetForegroundWindow","MessageBoxA","MessageBoxW"};
+            for(const char* name:names) if(api==name) return true;
+        }
+        if(module=="msvcrt.dll" || module=="ucrtbase.dll") {
+            static const char* names[]={"memcpy","memmove","memset","memcmp","strlen","strcmp","strncmp",
+                "malloc","calloc","realloc","free","abort","exit"};
+            for(const char* name:names) if(api==name) return true;
+        }
+        return false;
+    };
     if(importRva) {
         if(importRva>image.size()||importSize>image.size()-importRva||importSize<20)
             return "INVALID: import directory is outside mapped image.";
@@ -493,9 +521,12 @@ static std::string mapPeImage(const std::vector<uint8_t>& b) {
                     if(symbol.empty()||symbol.size()>=256)
                         return "INVALID: malformed import symbol name.";
                 }
+                const bool known=isKnownApi(dll,symbol);
+                if(known) ++recognizedApis;
                 const uint64_t stub=importStubBase+uint64_t(importSymbols)*16;
                 for(unsigned n=0;n<8;++n) image[static_cast<size_t>(dst)+n]=uint8_t(stub>>(n*8));
-                if(importDetails.size()<64) importDetails.push_back("  "+symbol+" -> diagnostic stub");
+                if(importDetails.size()<64)
+                    importDetails.push_back("  "+symbol+" -> "+(known?"known API placeholder":"unresolved placeholder"));
                 ++importSymbols;
             }
             if(!thunkTerminated) return "INVALID: import thunk limit exceeded.";
@@ -510,11 +541,13 @@ static std::string mapPeImage(const std::vector<uint8_t>& b) {
        <<"\nMapped image size: "<<image.size()<<" bytes\nSections mapped: "<<sections
        <<"\nBase relocations applied: "<<relocEntries<<" (DIR64: "<<dir64Entries
        <<", blocks: "<<relocBlocks<<")\nImport DLLs: "<<importDllCount
-       <<"\nIAT entries replaced with diagnostic stubs: "<<importSymbols<<"\n";
+       <<"\nIAT entries assigned placeholder addresses: "<<importSymbols
+       <<"\nNames matching API catalog (not executable): "<<recognizedApis<<"\n";
     for(const auto& detail:importDetails) out<<"  "<<detail<<"\n";
     out<<"BSS/uninitialized bytes: zero-filled\n"
        <<"Buffer is temporary and discarded after inspection; no code was executed.\n"
-       <<"Not implemented: real DLL loading, Windows API dispatch, TLS, page protections, process startup.";
+       <<"API catalog covers selected common imports for recognition only.\n"
+       <<"Not implemented: executable API dispatch, real DLL loading, TLS, page protections, process startup.";
     return out.str();
 }
 
