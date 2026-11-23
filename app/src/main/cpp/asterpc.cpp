@@ -392,6 +392,89 @@ static std::string mapPeImage(const std::vector<uint8_t>& b) {
             return "INVALID: section raw data exceeds file bounds.";
         if (rawSize) std::memcpy(image.data()+virtualAddress,b.data()+rawOffset,rawSize);
     }
+    // Validate relocation and import directories in the mapped image.
+    uint32_t directoryCount=0, relocRva=0, relocSize=0, importRva=0, importSize=0;
+    if (optionalSize >= 112) peRead32(b,opt+108,directoryCount);
+    if (directoryCount > 5 && optionalSize >= 112 + 6*8) {
+        peRead32(b,opt+112+5*8,relocRva); peRead32(b,opt+112+5*8+4,relocSize);
+    }
+    if (directoryCount > 1 && optionalSize >= 112 + 2*8) {
+        peRead32(b,opt+112+1*8,importRva); peRead32(b,opt+112+1*8+4,importSize);
+    }
+    uint32_t relocBlocks=0, relocEntries=0, dir64Entries=0;
+    if (relocRva || relocSize) {
+        if (!relocRva || relocSize < 8 || relocRva > image.size() || relocSize > image.size()-relocRva)
+            return "INVALID: base relocation directory is outside mapped image.";
+        size_t pos=relocRva, end=size_t(relocRva)+relocSize;
+        while (pos<end) {
+            if (end-pos<8) return "INVALID: truncated relocation block.";
+            uint32_t pageRva, blockSize;
+            if (!peRead32(image,pos,pageRva) || !peRead32(image,pos+4,blockSize) ||
+                blockSize<8 || blockSize>end-pos || ((blockSize-8)&1))
+                return "INVALID: malformed relocation block.";
+            const uint32_t count=(blockSize-8)/2;
+            for(uint32_t k=0;k<count;++k) {
+                uint16_t item;
+                if(!peRead16(image,pos+8+size_t(k)*2,item)) return "INVALID: truncated relocation entry.";
+                const unsigned type=item>>12;
+                const uint32_t target=pageRva+(item&0x0fff);
+                if(type==10) {
+                    if(target>image.size() || image.size()-target<8)
+                        return "INVALID: DIR64 relocation target is outside image.";
+                    ++dir64Entries;
+                } else if(type!=0) {
+                    return "UNSUPPORTED: relocation type other than ABSOLUTE/DIR64 encountered.";
+                }
+                if(type!=0) ++relocEntries;
+            }
+            ++relocBlocks; pos+=blockSize;
+        }
+    }
+    std::vector<std::string> importNames;
+    uint32_t importSymbols=0;
+    if (importRva || importSize) {
+        if (!importRva || importSize<20 || importRva>image.size() || importSize>image.size()-importRva)
+            return "INVALID: import directory is outside mapped image.";
+        size_t pos=importRva, end=size_t(importRva)+importSize;
+        bool terminated=false;
+        for(unsigned desc=0;desc<256 && pos+20<=end;++desc,pos+=20) {
+            uint32_t oft=0,time=0,chain=0,nameRva=0,firstThunk=0;
+            if(!peRead32(image,pos,oft)||!peRead32(image,pos+4,time)||
+               !peRead32(image,pos+8,chain)||!peRead32(image,pos+12,nameRva)||
+               !peRead32(image,pos+16,firstThunk)) return "INVALID: truncated import descriptor.";
+            if(!(oft|time|chain|nameRva|firstThunk)) { terminated=true; break; }
+            if(!nameRva || nameRva>=image.size() || !firstThunk || firstThunk>=image.size())
+                return "INVALID: import descriptor contains invalid RVA.";
+            std::string dll;
+            for(size_t q=nameRva;q<image.size() && q-nameRva<260 && image[q];++q)
+                dll.push_back(static_cast<char>(image[q]));
+            if(dll.empty() || dll.size()>=260) return "INVALID: invalid import DLL name.";
+            if(importNames.size()<32) importNames.push_back(dll);
+            const uint32_t thunkRva=oft?oft:firstThunk;
+            bool thunkTerminated=false;
+            for(uint32_t ti=0;ti<4096;++ti) {
+                const uint64_t tr=uint64_t(thunkRva)+uint64_t(ti)*8;
+                if(tr>image.size() || image.size()-static_cast<size_t>(tr)<8)
+                    return "INVALID: import thunk table exceeds image.";
+                uint64_t value=0;
+                if(!peRead64(image,static_cast<size_t>(tr),value)) return "INVALID: truncated import thunk.";
+                if(!value) { thunkTerminated=true; break; }
+                if(!(value & (uint64_t(1)<<63))) {
+                    const uint64_t hintName=value;
+                    if(hintName>=image.size() || image.size()-static_cast<size_t>(hintName)<3)
+                        return "INVALID: import-by-name RVA is outside image.";
+                    bool nameEnd=false;
+                    for(size_t q=static_cast<size_t>(hintName)+2;q<image.size() && q-static_cast<size_t>(hintName)<260;++q) {
+                        if(image[q]==0) { nameEnd=true; break; }
+                    }
+                    if(!nameEnd) return "INVALID: unterminated import symbol name.";
+                }
+                ++importSymbols;
+            }
+            if(!thunkTerminated) return "INVALID: import thunk limit exceeded.";
+        }
+        if(!terminated) return "INVALID: import descriptor table has no terminator.";
+    }
     std::ostringstream out;
     out << "PE IMAGE MAPPED INTO TEMPORARY GUEST BUFFER\n"
         << "Architecture: x86-64 PE32+\n"
@@ -400,7 +483,10 @@ static std::string mapPeImage(const std::vector<uint8_t>& b) {
         << "Mapped image size: " << image.size() << " bytes\n"
         << "Headers copied: " << headersSize << " bytes\n"
         << "Sections mapped: " << sections << "\n"
-        << "Uninitialized section bytes: zero-filled\n"
+        << "Relocation blocks validated: " << relocBlocks << " (DIR64 entries: " << dir64Entries << ")\n"
+        << "Import DLLs: " << importNames.size() << " listed (symbols validated: " << importSymbols << ")\n";
+    for (const auto& dll : importNames) out << "  DLL: " << dll << "\n";
+    out << "Uninitialized section bytes: zero-filled\n"
         << "Validation: section bounds and raw file ranges checked\n"
         << "IMPORTANT: temporary validation buffer only; not installed in persistent guest RAM and NOT executed.\n"
         << "Not implemented: relocations, imports/IAT, TLS, DLLs, Windows APIs, page protections.";
