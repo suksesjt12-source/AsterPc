@@ -86,7 +86,9 @@ struct Machine {
     }
     bool fetchN(uint64_t& v,unsigned n) {
         if(!range(cpu.rip,n)) return fail("truncated instruction immediate");
-        v=0; for(unsigned i=0;i<n;i++) v|=uint64_t(mem[static_cast<size_t>(cpu.rip++)])<<(i*8);
+        const size_t offset=static_cast<size_t>(cpu.rip-memoryBase);
+        v=0; for(unsigned i=0;i<n;i++) v|=uint64_t(mem[offset+i])<<(i*8);
+        cpu.rip+=n;
         return true;
     }
     bool readMem(uint64_t a,unsigned n,uint64_t& v) {
