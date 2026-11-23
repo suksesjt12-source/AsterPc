@@ -29,7 +29,7 @@ Tidak semua encoding, prefix, ukuran operand, atau addressing mode x86-64 tersed
 - Parsing import descriptor, import-by-name, serta import ordinal.
 - Pemeriksaan permission section dari flag PE read/write/execute.
 - Registry metadata untuk nama DLL import dan jumlah simbolnya.
-- Daftar nama API umum untuk pengenalan saja.
+- Import API yang sudah didukung dispatcher dibedakan dari import yang belum didukung; hanya enam fungsi yang benar-benar tersedia memperoleh alamat thunk yang dapat dipanggil pada model.
 
 **Batasan loader:** alamat IAT dan handle DLL masih placeholder diagnostik dan belum otomatis terdaftar ke CPU thunk registry. DLL tidak dimuat atau dieksekusi. TLS, startup process, page-protection enforcement saat eksekusi, dan loader lengkap belum ada. PE image dipetakan hanya untuk pemeriksaan dan kemudian dibuang.
 
@@ -52,6 +52,7 @@ Tombol **Run CPU + Windows API integration self-test** menjalankan:
 - Tes smoke PE32+ sintetis dan penolakan section overlap.
 - Tes CPU indirect `CALL RAX` ke thunk `GetTickCount64`.
 - Tes RIP-relative `CALL [RIP+disp32]` terhadap slot IAT sintetis.
+- Tes resolver import PE dengan satu thunk API didukung dan satu impor non-callable.
 - Tes alur `SetLastError` lalu `GetLastError` melalui register CPU.
 - Tes `ExitProcess` menghentikan eksekusi guest dengan exit code yang diminta.
 
