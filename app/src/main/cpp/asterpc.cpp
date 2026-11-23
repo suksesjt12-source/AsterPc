@@ -489,7 +489,7 @@ std::string selfTests() {
     bool pass=a.rfind("PASS",0)==0&&b.rfind("PASS",0)==0&&c.rfind("PASS",0)==0&&
               d.rfind("PASS",0)==0&&vm.rfind("PASS",0)==0&&peMapPass&&overlapRejected&&
               apiCallPass&&lastErrorCallPass&&exitCallPass;
-    return std::string("ASTERPC CPU + GUEST MEMORY + PE MAPPER: ")+(pass?"ALL TESTS PASS":"TEST FAILURE")+
+    return std::string("ASTERPC CPU + WIN32 THUNKS + GUEST MEMORY + PE MAPPER: ")+(pass?"ALL TESTS PASS":"TEST FAILURE")+
       "\n1 MOV/ADD: "+a+"\n2 memory store/load: "+b+"\n3 register arithmetic: "+c+"\n4 shift: "+d+
       "\n5 guest virtual memory: "+vm+
       "\n6 PE section mapping: "+(peMapPass?"PASS: synthetic PE32+ image mapped with RX section permissions":"FAIL: "+peMap)+
