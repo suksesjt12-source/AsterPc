@@ -52,7 +52,7 @@ public class MainActivity extends Activity {
         root.addView(subtitle);
 
         TextView status = new TextView(this);
-        status.setText("\nStatus: prototype 0.7.0\nHost ABI: " + android.os.Build.SUPPORTED_ABIS[0]
+        status.setText("\nStatus: prototype 0.8.0\nHost ABI: " + android.os.Build.SUPPORTED_ABIS[0]
                 + "\nCPU: experimental x86-64 interpreter\nMemory: bounded guest address-space + PE section mapping\nDLLs: import-module metadata registry\nAPI: limited Win64 dispatcher (test-only)\nGPU: native RGBA framebuffer + OpenGL ES 2.0");
         status.setTextColor(0xFFE4ECF5);
         status.setTextSize(15);
