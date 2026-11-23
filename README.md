@@ -1,4 +1,4 @@
-# AsterPC
+# AsterPC 0.7.0
 
 AsterPC adalah prototipe riset emulator PC untuk Android ARM64. Proyek ini **belum dapat menjalankan aplikasi atau game Windows**.
 
@@ -39,17 +39,20 @@ Tidak semua encoding, prefix, ukuran operand, atau addressing mode x86-64 tersed
 - Supports a virtual tick source and isolated guest last-error / exit-state fields; it does not call host Windows APIs or affect Android.
 - Includes a separate native self-test exposed by the Android UI.
 
-**Important limitation:** this dispatcher is not yet connected to the x86-64 interpreter, PE IAT entries, a guest thread scheduler, or a real Windows process. It is a call-frame model only.
+**Integration status:** the x86-64 interpreter can now execute indirect `CALL r/m64` instructions targeting explicitly registered API thunk addresses. The bridge transfers `RCX`, `RDX`, `R8`, and `R9`, returns API results through `RAX`, and turns `ExitProcess` into a guest stop request. Self-tests cover `GetTickCount64`, `SetLastError`/`GetLastError`, and `ExitProcess`. The PE parser still writes diagnostic placeholder addresses rather than automatically registering each imported API; this is not yet a complete PE runtime or Windows process.
 
 ## GPU
 Aplikasi menampilkan framebuffer RGBA sintetis melalui JNI dan OpenGL ES 2.0. Ini hanya pola uji, bukan output Windows, bukan penerjemah DirectX/Vulkan, dan belum terhubung ke CPU guest.
 
 ## Pengujian aplikasi
-Tombol **Run CPU interpreter self-test** menjalankan:
+Tombol **Run CPU + Windows API integration self-test** menjalankan:
 - Tes MOV/ADD, memory read/write, arithmetic, dan shift.
 - Tes pemetaan region, akses permission, dan penolakan overlap.
 - Tes registry DLL metadata dan deduplikasi nama yang tidak peka huruf besar/kecil.
 - Tes smoke PE32+ sintetis dan penolakan section overlap.
+- Tes CPU indirect `CALL` ke thunk `GetTickCount64`.
+- Tes alur `SetLastError` lalu `GetLastError` melalui register CPU.
+- Tes `ExitProcess` menghentikan eksekusi guest dengan exit code yang diminta.
 
 Tes ini adalah tes internal sederhana, bukan verifikasi kompatibilitas Windows atau validasi menyeluruh terhadap file PE dari dunia nyata.
 
