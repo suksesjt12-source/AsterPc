@@ -52,7 +52,7 @@ public class MainActivity extends Activity {
         root.addView(subtitle);
 
         TextView status = new TextView(this);
-        status.setText("\nStatus: prototype 0.6.0\nHost ABI: " + android.os.Build.SUPPORTED_ABIS[0]
+        status.setText("\nStatus: prototype 0.7.0\nHost ABI: " + android.os.Build.SUPPORTED_ABIS[0]
                 + "\nCPU: experimental x86-64 interpreter\nMemory: bounded guest address-space + PE section mapping\nDLLs: import-module metadata registry\nAPI: limited Win64 dispatcher (test-only)\nGPU: native RGBA framebuffer + OpenGL ES 2.0");
         status.setTextColor(0xFFE4ECF5);
         status.setTextSize(15);
@@ -64,7 +64,7 @@ public class MainActivity extends Activity {
         gpu.setOnClickListener(v -> startActivity(new Intent(this, GpuActivity.class)));
 
         Button test = new Button(this);
-        test.setText("Run CPU interpreter self-test");
+        test.setText("Run CPU + Windows API integration self-test");
         root.addView(test);
 
         Button pe = new Button(this);
@@ -89,7 +89,7 @@ public class MainActivity extends Activity {
         root.addView(output);
 
         TextView warning = new TextView(this);
-        warning.setText("\nImportant: PE headers and sections are mapped into a bounded guest-memory model. A small deterministic Win32 API dispatcher is available for isolated tests, but is not connected to the guest CPU or IAT. DLLs are not loaded. No Windows program can run yet. GPU output is a test framebuffer, not DirectX/Vulkan translation.");
+        warning.setText("\nImportant: PE headers and sections are mapped into a bounded guest-memory model. A limited Win32 dispatcher can be called by the experimental CPU through explicitly registered test thunks. PE IAT entries are not yet automatically bound and DLLs are not loaded. No Windows program can run yet. GPU output is a test framebuffer, not DirectX/Vulkan translation.");
         warning.setTextColor(0xFFFFD28A);
         warning.setTextSize(13);
         root.addView(warning);
