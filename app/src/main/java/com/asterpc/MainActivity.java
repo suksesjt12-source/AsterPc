@@ -51,7 +51,7 @@ public class MainActivity extends Activity {
         root.addView(subtitle);
 
         TextView status = new TextView(this);
-        status.setText("\nStatus: prototype 0.3.0\nHost ABI: " + android.os.Build.SUPPORTED_ABIS[0]
+        status.setText("\nStatus: prototype 0.4.0\nHost ABI: " + android.os.Build.SUPPORTED_ABIS[0]
                 + "\nCPU: experimental x86-64 interpreter\nGPU: native RGBA framebuffer + OpenGL ES 2.0");
         status.setTextColor(0xFFE4ECF5);
         status.setTextSize(15);
@@ -84,7 +84,7 @@ public class MainActivity extends Activity {
         root.addView(output);
 
         TextView warning = new TextView(this);
-        warning.setText("\nImportant: PE inspection only reads file headers and section metadata. It does not load or run Windows programs. GPU output is a test framebuffer, not DirectX/Vulkan translation.");
+        warning.setText("\nImportant: PE mapping and import recognition are diagnostic prototypes. IAT addresses are placeholders; Windows APIs and DLLs are not executed. No Windows program can run yet. GPU output is a test framebuffer, not DirectX/Vulkan translation.");
         warning.setTextColor(0xFFFFD28A);
         warning.setTextSize(13);
         root.addView(warning);
