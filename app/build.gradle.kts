@@ -8,8 +8,8 @@ android {
         applicationId = "com.asterpc"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "0.8.1"
+        versionCode = 10
+        versionName = "0.8.2"
         externalNativeBuild {
             cmake { cppFlags += listOf("-std=c++17", "-O2") }
         }
