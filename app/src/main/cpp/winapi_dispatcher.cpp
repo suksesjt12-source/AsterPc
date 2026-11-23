@@ -1,4 +1,5 @@
 #include "winapi_dispatcher.h"
+#include <jni.h>
 
 #include <algorithm>
 #include <cctype>
