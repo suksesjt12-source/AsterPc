@@ -105,16 +105,24 @@ struct Machine {
         unsigned mod=modrm>>6, rawReg=(modrm>>3)&7, rawRm=modrm&7;
         reg=rawReg+((rex&4)?8:0);
         if(mod==3) { rm={true,rawRm+((rex&1)?8:0),0}; return true; }
-        uint64_t base=0; bool hasBase=true;
+        uint64_t base=0; bool hasBase=true; bool ripRelative=false;
         if(rawRm==4) {
             uint8_t sib; if(!fetch8(sib)) return false;
             unsigned scale=sib>>6, idx=((sib>>3)&7)+((rex&2)?8:0), b=(sib&7)+((rex&1)?8:0);
             if(((sib>>3)&7)!=4 || (rex&2)) base+=cpu.r[idx] << scale;
             if(mod==0 && (sib&7)==5) hasBase=false; else base+=cpu.r[b];
-        } else if(mod==0 && rawRm==5) hasBase=false;
-        else base=cpu.r[rawRm+((rex&1)?8:0)];
+        } else if(mod==0 && rawRm==5) {
+            hasBase=false;
+            ripRelative=true;
+        } else base=cpu.r[rawRm+((rex&1)?8:0)];
         int64_t disp=0;
-        if(mod==0 && !hasBase) { uint64_t d; if(!fetchN(d,4)) return false; int32_t x; std::memcpy(&x,&d,4); disp=x; }
+        if(mod==0 && !hasBase) {
+            uint64_t d; if(!fetchN(d,4)) return false;
+            int32_t x; std::memcpy(&x,&d,4); disp=x;
+            // In 64-bit mode, ModRM mod=00 r/m=101 is RIP-relative.
+            // SIB base=101 remains a no-base absolute displacement form.
+            if(ripRelative) base=cpu.rip;
+        }
         else if(mod==1) { uint8_t d; if(!fetch8(d)) return false; disp=static_cast<int8_t>(d); }
         else if(mod==2) { uint64_t d; if(!fetchN(d,4)) return false; int32_t x; std::memcpy(&x,&d,4); disp=x; }
         int64_t addr=static_cast<int64_t>(base)+disp;
@@ -432,6 +440,17 @@ std::string selfTests() {
     const bool apiCallPass=apiBound && apiMachine.run() &&
                            apiMachine.cpu.r[RAX]==0x100000005ULL;
 
+    // Real x64 IAT-style indirection: CALL qword ptr [RIP+disp32].
+    std::vector<uint8_t> iatProgram={0xFF,0x15,0xFA,0x00,0x00,0x00,0xF4};
+    Machine iatMachine(iatProgram);
+    const uint64_t iatTarget=API_STUB_BASE+0x50;
+    for(unsigned n=0;n<8;++n)
+        iatMachine.mem[0x100+n]=uint8_t(iatTarget>>(n*8));
+    const bool iatBound=iatMachine.bindApiStub(iatTarget,"kernel32.dll","GetTickCount64");
+    iatMachine.apiFrame.virtualMilliseconds=0xABCDEF0123ULL;
+    const bool iatCallPass=iatBound && iatMachine.run() &&
+                           iatMachine.cpu.r[RAX]==0xABCDEF0123ULL;
+
     std::vector<uint8_t> lastErrorProgram={0x48,0xB9};
     for(unsigned n=0;n<8;++n) lastErrorProgram.push_back(uint8_t(uint64_t(1234)>>(n*8)));
     lastErrorProgram.insert(lastErrorProgram.end(),{0x48,0xB8});
@@ -488,15 +507,16 @@ std::string selfTests() {
 
     bool pass=a.rfind("PASS",0)==0&&b.rfind("PASS",0)==0&&c.rfind("PASS",0)==0&&
               d.rfind("PASS",0)==0&&vm.rfind("PASS",0)==0&&peMapPass&&overlapRejected&&
-              apiCallPass&&lastErrorCallPass&&exitCallPass;
+              apiCallPass&&iatCallPass&&lastErrorCallPass&&exitCallPass;
     return std::string("ASTERPC CPU + WIN32 THUNKS + GUEST MEMORY + PE MAPPER: ")+(pass?"ALL TESTS PASS":"TEST FAILURE")+
       "\n1 MOV/ADD: "+a+"\n2 memory store/load: "+b+"\n3 register arithmetic: "+c+"\n4 shift: "+d+
       "\n5 guest virtual memory: "+vm+
       "\n6 PE section mapping: "+(peMapPass?"PASS: synthetic PE32+ image mapped with RX section permissions":"FAIL: "+peMap)+
       "\n7 PE overlap guard: "+(overlapRejected?"PASS: overlapping section rejected":"FAIL: "+overlapResult)+
-      "\n8 CPU indirect CALL -> GetTickCount64 thunk: "+(apiCallPass?"PASS":"FAIL")+
-      "\n9 CPU CALL -> SetLastError/GetLastError: "+(lastErrorCallPass?"PASS":"FAIL")+
-      "\n10 CPU CALL -> ExitProcess guest stop: "+(exitCallPass?"PASS":"FAIL")+
+      "\n8 CPU indirect CALL RAX -> GetTickCount64 thunk: "+(apiCallPass?"PASS":"FAIL")+
+      "\n9 x64 IAT-style CALL [RIP+disp32] -> GetTickCount64: "+(iatCallPass?"PASS":"FAIL")+
+      "\n10 CPU CALL -> SetLastError/GetLastError: "+(lastErrorCallPass?"PASS":"FAIL")+
+      "\n11 CPU CALL -> ExitProcess guest stop: "+(exitCallPass?"PASS":"FAIL")+
       "\nGuest RAM: 1 MiB, bounds-checked, little-endian; stack resides in guest RAM."+
       "\nVirtual memory prototype: isolated regions, overlap rejection, read/write/execute permissions, 256 MiB commit cap."+
       "\nInstructions: MOV, LEA, ADD, SUB, OR, AND, XOR, CMP, TEST, INC, DEC, NOT, NEG, SHL, SHR, SAR, PUSH, POP, CALL, RET, JMP, JZ, JNZ, NOP, HLT."+
