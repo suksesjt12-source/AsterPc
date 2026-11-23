@@ -337,3 +337,86 @@ Java_com_asterpc_MainActivity_inspectPe(JNIEnv* env, jobject, jbyteArray input) 
     const std::string result = inspectPe(bytes);
     return env->NewStringUTF(result.c_str());
 }
+
+
+namespace {
+static std::string mapPeImage(const std::vector<uint8_t>& b) {
+    if (b.size() < 64 || b[0] != 'M' || b[1] != 'Z')
+        return "INVALID: DOS MZ signature not found.";
+    uint32_t peOff;
+    if (!peRead32(b,0x3c,peOff) || size_t(peOff) > b.size() || b.size()-size_t(peOff) < 24)
+        return "INVALID: PE header offset is outside the file.";
+    const size_t p = static_cast<size_t>(peOff);
+    if (b[p]!='P' || b[p+1]!='E' || b[p+2]!=0 || b[p+3]!=0)
+        return "INVALID: PE signature not found.";
+    uint16_t machine, sections, optionalSize;
+    if (!peRead16(b,p+4,machine) || !peRead16(b,p+6,sections) ||
+        !peRead16(b,p+20,optionalSize)) return "INVALID: truncated COFF header.";
+    const size_t opt=p+24;
+    if (machine!=0x8664) return "UNSUPPORTED: only x86-64 PE images are accepted.";
+    if (opt>b.size() || optionalSize>b.size()-opt || optionalSize<0x70)
+        return "INVALID: truncated PE32+ optional header.";
+    uint16_t magic;
+    uint32_t entry, sectionAlign, fileAlign, imageSize, headersSize;
+    uint64_t imageBase;
+    if (!peRead16(b,opt,magic) || !peRead32(b,opt+16,entry) ||
+        !peRead64(b,opt+24,imageBase) || !peRead32(b,opt+32,sectionAlign) ||
+        !peRead32(b,opt+36,fileAlign) || !peRead32(b,opt+56,imageSize) ||
+        !peRead32(b,opt+60,headersSize))
+        return "INVALID: incomplete PE32+ optional header.";
+    if (magic!=0x20b) return "UNSUPPORTED: PE32+ format required.";
+    if (!sections || sections>96) return "INVALID: unreasonable section count.";
+    if (!imageSize || imageSize>(128u*1024u*1024u))
+        return "REJECTED: SizeOfImage must be between 1 byte and 128 MiB.";
+    if (!headersSize || headersSize>b.size() || headersSize>imageSize)
+        return "INVALID: SizeOfHeaders is outside file/image bounds.";
+    if (!sectionAlign || !fileAlign || (sectionAlign & (sectionAlign-1)) ||
+        (fileAlign & (fileAlign-1)) || fileAlign>65536 || sectionAlign<fileAlign)
+        return "INVALID: unsupported or inconsistent PE alignment.";
+    if (entry>=imageSize) return "INVALID: entry point RVA exceeds image.";
+    const size_t table=opt+optionalSize;
+    if (table>b.size() || size_t(sections)>(b.size()-table)/40)
+        return "INVALID: section table exceeds file bounds.";
+    std::vector<uint8_t> image(static_cast<size_t>(imageSize),0);
+    std::memcpy(image.data(),b.data(),headersSize);
+    for (unsigned i=0;i<sections;++i) {
+        const size_t s=table+size_t(i)*40;
+        uint32_t virtualSize, virtualAddress, rawSize, rawOffset;
+        if (!peRead32(b,s+8,virtualSize) || !peRead32(b,s+12,virtualAddress) ||
+            !peRead32(b,s+16,rawSize) || !peRead32(b,s+20,rawOffset))
+            return "INVALID: malformed section header.";
+        const uint64_t mappedSize=std::max<uint64_t>(virtualSize,rawSize);
+        if (mappedSize && (virtualAddress>imageSize || mappedSize>uint64_t(imageSize)-virtualAddress))
+            return "INVALID: section virtual range exceeds SizeOfImage.";
+        if (rawSize && (rawOffset>b.size() || rawSize>b.size()-rawOffset))
+            return "INVALID: section raw data exceeds file bounds.";
+        if (rawSize) std::memcpy(image.data()+virtualAddress,b.data()+rawOffset,rawSize);
+    }
+    std::ostringstream out;
+    out << "PE IMAGE MAPPED INTO TEMPORARY GUEST BUFFER\n"
+        << "Architecture: x86-64 PE32+\n"
+        << "Image base (preferred): 0x" << std::hex << imageBase << "\n"
+        << "Entry RVA: 0x" << entry << std::dec << "\n"
+        << "Mapped image size: " << image.size() << " bytes\n"
+        << "Headers copied: " << headersSize << " bytes\n"
+        << "Sections mapped: " << sections << "\n"
+        << "Uninitialized section bytes: zero-filled\n"
+        << "Validation: section bounds and raw file ranges checked\n"
+        << "IMPORTANT: temporary validation buffer only; not installed in persistent guest RAM and NOT executed.\n"
+        << "Not implemented: relocations, imports/IAT, TLS, DLLs, Windows APIs, page protections.";
+    return out.str();
+}
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_asterpc_MainActivity_mapPeImage(JNIEnv* env,jobject,jbyteArray input) {
+    if (input==nullptr) return env->NewStringUTF("No file data received.");
+    const jsize length=env->GetArrayLength(input);
+    if (length<=0 || length>64*1024*1024)
+        return env->NewStringUTF("File rejected: size must be between 1 byte and 64 MiB.");
+    std::vector<uint8_t> bytes(static_cast<size_t>(length));
+    env->GetByteArrayRegion(input,0,length,reinterpret_cast<jbyte*>(bytes.data()));
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return env->NewStringUTF("Could not read file bytes."); }
+    const std::string result=mapPeImage(bytes);
+    return env->NewStringUTF(result.c_str());
+}
