@@ -53,6 +53,7 @@ Tombol **Run CPU + Windows API integration self-test** menjalankan:
 - Tes CPU indirect `CALL RAX` ke thunk `GetTickCount64`.
 - Tes RIP-relative `CALL [RIP+disp32]` terhadap slot IAT sintetis.
 - Tes resolver import PE dengan satu thunk API didukung dan satu impor non-callable.
+- Tes capability lookup dispatcher: nama DLL dinormalisasi, nama export tetap exact-match, dan API/DLL yang belum didukung ditolak.
 - Tes alur `SetLastError` lalu `GetLastError` melalui register CPU.
 - Tes `ExitProcess` menghentikan eksekusi guest dengan exit code yang diminta.
 
