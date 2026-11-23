@@ -501,6 +501,13 @@ struct PeRuntimeImage {
     std::vector<PeImportBinding> imports;
 };
 
+enum GuestThreadState : uint32_t {
+    GUEST_THREAD_READY=1,
+    GUEST_THREAD_RUNNING=2,
+    GUEST_THREAD_EXITED=3,
+    GUEST_THREAD_FAULTED=4
+};
+
 struct GuestProcessContext {
     bool initialized=false;
     uint64_t imageBase=0;
@@ -514,6 +521,8 @@ struct GuestProcessContext {
     uint64_t threadMetadataAddress=0;
     uint64_t processId=0;
     uint64_t primaryThreadId=0;
+    uint32_t threadState=0;
+    uint32_t threadExitCode=0;
     uint32_t importedSymbolCount=0;
     size_t moduleCount=0;
     GuestModuleRegistry modules;
@@ -640,7 +649,8 @@ public:
             writeRecord64(threadRecord+16,stackBase) &&
             writeRecord64(threadRecord+24,stackTop) &&
             writeRecord64(threadRecord+32,initialStack) &&
-            writeRecord64(threadRecord+40,0);
+            writeRecord32(threadRecord+40,GUEST_THREAD_READY) &&
+            writeRecord32(threadRecord+44,0);
         const bool processRecordWritten=
             writeRecord32(processRecord,0x50534141u) && // AASP, custom magic
             writeRecord32(processRecord+4,1) &&
@@ -683,9 +693,28 @@ public:
         context.threadMetadataAddress=threadRecord;
         context.processId=1;
         context.primaryThreadId=1;
+        context.threadState=GUEST_THREAD_READY;
+        context.threadExitCode=0;
         context.importedSymbolCount=context.modules.importCount();
         context.moduleCount=context.modules.size();
         context.initialized=true;
+        return true;
+    }
+
+    bool setThreadState(Machine& machine,uint32_t state,uint32_t exitCode=0) {
+        if(!context.initialized || state<GUEST_THREAD_READY ||
+           state>GUEST_THREAD_FAULTED ||
+           !machine.range(context.threadMetadataAddress,48)) {
+            context.error="invalid guest thread state transition";
+            return false;
+        }
+        if(!machine.writeMem(context.threadMetadataAddress+40,4,state) ||
+           !machine.writeMem(context.threadMetadataAddress+44,4,exitCode)) {
+            context.error="could not update guest thread metadata";
+            return false;
+        }
+        context.threadState=state;
+        context.threadExitCode=exitCode;
         return true;
     }
 
@@ -876,7 +905,9 @@ std::string selfTests() {
                 peRuntimeMachine.readMem(threadPtr+24,8,stackTop) &&
                 stackTop==processBootstrap.context.stackTop &&
                 peRuntimeMachine.readMem(threadPtr+32,8,initialRsp) &&
-                initialRsp==processBootstrap.context.initialStackPointer;
+                initialRsp==processBootstrap.context.initialStackPointer &&
+                peRuntimeMachine.readMem(threadPtr+40,4,magic) &&
+                magic==GUEST_THREAD_READY;
         }() &&
         GuestProcessBootstrap::wideAsciiEquals(peRuntimeMachine,
             processBootstrap.context.commandLineAddress,"asterpc-test.exe --runtime-smoke") &&
@@ -889,7 +920,18 @@ std::string selfTests() {
 
     constexpr uint64_t PE_TEST_TICKS=0x123456789ABCULL;
     peRuntimeMachine.apiFrame.virtualMilliseconds=PE_TEST_TICKS;
-    const bool peRuntimeCallPass=processContextPass && peRuntimeMachine.run() &&
+    const bool threadRunningPass=processContextPass &&
+        processBootstrap.setThreadState(peRuntimeMachine,GUEST_THREAD_RUNNING);
+    const bool peRuntimeExecuted=threadRunningPass && peRuntimeMachine.run();
+    const bool threadExitPass=peRuntimeExecuted && peRuntimeMachine.cpu.halted &&
+        processBootstrap.setThreadState(peRuntimeMachine,GUEST_THREAD_EXITED,0);
+    uint64_t finalThreadState=0,finalThreadExitCode=1;
+    const bool threadStateStored=threadExitPass &&
+        peRuntimeMachine.readMem(processBootstrap.context.threadMetadataAddress+40,4,finalThreadState) &&
+        peRuntimeMachine.readMem(processBootstrap.context.threadMetadataAddress+44,4,finalThreadExitCode) &&
+        finalThreadState==GUEST_THREAD_EXITED && finalThreadExitCode==0 &&
+        processBootstrap.context.threadState==GUEST_THREAD_EXITED;
+    const bool peRuntimeCallPass=threadStateStored &&
                                  peRuntimeMachine.cpu.r[RAX]==PE_TEST_TICKS;
 
     std::vector<uint8_t> unsupportedPeBytes=runtimeImage.bytes;
@@ -905,7 +947,8 @@ std::string selfTests() {
     bool pass=a.rfind("PASS",0)==0&&b.rfind("PASS",0)==0&&c.rfind("PASS",0)==0&&
               d.rfind("PASS",0)==0&&vm.rfind("PASS",0)==0&&peMapPass&&overlapRejected&&
               apiCallPass&&iatCallPass&&lastErrorCallPass&&exitCallPass&&importResolverPass&&
-              processBootstrapPass&&processContextPass&&peRuntimeCallPass&&unsupportedImportRejected;
+              processBootstrapPass&&processContextPass&&threadRunningPass&&
+              threadStateStored&&peRuntimeCallPass&&unsupportedImportRejected;
     return std::string("ASTERPC CPU + WIN32 THUNKS + GUEST MEMORY + PE MAPPER: ")+(pass?"ALL TESTS PASS":"TEST FAILURE")+
       "\n1 MOV/ADD: "+a+"\n2 memory store/load: "+b+"\n3 register arithmetic: "+c+"\n4 shift: "+d+
       "\n5 guest virtual memory: "+vm+
@@ -920,7 +963,8 @@ std::string selfTests() {
       "\n14 process bootstrap + UTF-16 process parameters: "+(processBootstrapPass?"PASS: "+std::to_string(processBootstrap.context.moduleCount)+" module records":"FAIL: "+processBootstrap.context.error)+
       "\n15 process image/stack/module registry validation: "+(processContextPass?"PASS":"FAIL")+
       "\n16 synthetic process/thread metadata records: "+(processContextPass?"PASS: PID/TID, image, parameters, stack bounds, and thread link":"FAIL")+
-      "\n17 unsupported PE IAT import remains non-callable: "+(unsupportedImportRejected?"PASS":"FAIL")+
+      "\n17 guest thread state lifecycle: "+(threadStateStored?"PASS: READY -> RUNNING -> EXITED with exit code":"FAIL")+
+      "\n18 unsupported PE IAT import remains non-callable: "+(unsupportedImportRejected?"PASS":"FAIL")+
       "\nGuest RAM: 1 MiB minimum, bounds-checked, little-endian; stack resides in guest RAM."+
       "\nPE runtime test: mapped PE image bytes and IAT are consumed directly by the experimental CPU; supported imports bind to deterministic API thunks."+
       "\nVirtual memory prototype: isolated regions, overlap rejection, read/write/execute permissions, 256 MiB commit cap."+
