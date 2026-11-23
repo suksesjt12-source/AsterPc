@@ -261,3 +261,79 @@ Java_com_asterpc_GpuRenderer_nativeGetFramebuffer(JNIEnv* env, jclass, jint widt
     if (result != nullptr) env->SetByteArrayRegion(result, 0, static_cast<jsize>(bytes), pixels.data());
     return result;
 }
+
+
+namespace {
+static bool peRead16(const std::vector<uint8_t>& b, size_t o, uint16_t& v) {
+    if (o > b.size() || b.size() - o < 2) return false;
+    v = uint16_t(b[o]) | (uint16_t(b[o + 1]) << 8); return true;
+}
+static bool peRead32(const std::vector<uint8_t>& b, size_t o, uint32_t& v) {
+    if (o > b.size() || b.size() - o < 4) return false;
+    v = uint32_t(b[o]) | (uint32_t(b[o+1]) << 8) | (uint32_t(b[o+2]) << 16) | (uint32_t(b[o+3]) << 24); return true;
+}
+static bool peRead64(const std::vector<uint8_t>& b, size_t o, uint64_t& v) {
+    uint32_t lo, hi; if (!peRead32(b,o,lo) || !peRead32(b,o+4,hi)) return false;
+    v = uint64_t(lo) | (uint64_t(hi) << 32); return true;
+}
+static std::string inspectPe(const std::vector<uint8_t>& b) {
+    if (b.size() < 64 || b[0] != 'M' || b[1] != 'Z') return "INVALID: DOS MZ signature not found.";
+    uint32_t peOff;
+    if (!peRead32(b,0x3c,peOff) || peOff > b.size() || b.size()-peOff < 24)
+        return "INVALID: PE header offset is outside the file.";
+    if (b[peOff] != 'P' || b[peOff+1] != 'E' || b[peOff+2] != 0 || b[peOff+3] != 0)
+        return "INVALID: PE signature not found.";
+    uint16_t machine, sections, optionalSize;
+    if (!peRead16(b,peOff+4,machine) || !peRead16(b,peOff+6,sections) ||
+        !peRead16(b,peOff+20,optionalSize)) return "INVALID: truncated COFF header.";
+    const size_t opt = size_t(peOff) + 24;
+    if (optionalSize < 0x70 || opt > b.size() || optionalSize > b.size()-opt)
+        return "INVALID: truncated optional header.";
+    uint16_t magic; uint32_t entryRva; uint64_t imageBase;
+    if (!peRead16(b,opt,magic) || !peRead32(b,opt+16,entryRva) || !peRead64(b,opt+24,imageBase))
+        return "INVALID: optional header fields are truncated.";
+    if (machine != 0x8664 || magic != 0x20b)
+        return "UNSUPPORTED: this prototype inspector accepts PE32+ x86-64 only.\nMachine: " +
+          std::string(machine == 0x14c ? "x86" : "other") + "\nOptional header: " +
+          (magic == 0x10b ? "PE32" : "not PE32+");
+    if (sections == 0 || sections > 96) return "INVALID: unreasonable section count.";
+    const size_t table = opt + optionalSize;
+    if (table > b.size() || size_t(sections) > (b.size()-table)/40)
+        return "INVALID: section table exceeds file bounds.";
+    std::ostringstream out;
+    out << "PE32+ x86-64 file detected\n"
+        << "File size: " << b.size() << " bytes\n"
+        << "Sections: " << sections << "\n"
+        << "Image base: 0x" << std::hex << imageBase << "\n"
+        << "Entry RVA: 0x" << entryRva << std::dec << "\n"
+        << "Section table:\n";
+    for (unsigned i=0; i<sections; ++i) {
+        const size_t s=table+size_t(i)*40;
+        char name[9]{}; std::memcpy(name,b.data()+s,8);
+        uint32_t virtualSize, virtualAddress, rawSize, rawOffset;
+        if (!peRead32(b,s+8,virtualSize) || !peRead32(b,s+12,virtualAddress) ||
+            !peRead32(b,s+16,rawSize) || !peRead32(b,s+20,rawOffset))
+            return "INVALID: malformed section header.";
+        if (rawSize && (rawOffset > b.size() || rawSize > b.size()-rawOffset))
+            return "INVALID: section raw data exceeds file bounds.";
+        out << "  " << name << " RVA=0x" << std::hex << virtualAddress
+            << " virtual=" << virtualSize << " raw=" << rawSize << std::dec << "\n";
+    }
+    out << "Result: structure parsed; image is NOT mapped or executed.\n"
+        << "Not yet supported: relocations, imports, TLS, DLL loading, Win32 APIs.";
+    return out.str();
+}
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_asterpc_MainActivity_inspectPe(JNIEnv* env, jobject, jbyteArray input) {
+    if (input == nullptr) return env->NewStringUTF("No file data received.");
+    const jsize length = env->GetArrayLength(input);
+    if (length <= 0 || length > 64 * 1024 * 1024)
+        return env->NewStringUTF("File rejected: size must be between 1 byte and 64 MiB.");
+    std::vector<uint8_t> bytes(static_cast<size_t>(length));
+    env->GetByteArrayRegion(input, 0, length, reinterpret_cast<jbyte*>(bytes.data()));
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return env->NewStringUTF("Could not read file bytes."); }
+    const std::string result = inspectPe(bytes);
+    return env->NewStringUTF(result.c_str());
+}
