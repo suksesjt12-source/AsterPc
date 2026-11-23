@@ -238,3 +238,26 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_com_asterpc_MainActivity_runSelfTest(JNIEnv* env,jobject) {
     std::string out=selfTests(); return env->NewStringUTF(out.c_str());
 }
+
+
+// Guest display prototype: a bounded RGBA framebuffer exposed to the Android renderer.
+// The current pixels are a diagnostic test pattern; CPU/Windows output is not connected yet.
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_com_asterpc_GpuRenderer_nativeGetFramebuffer(JNIEnv* env, jclass, jint width, jint height) {
+    if (width <= 0 || height <= 0 || width > 512 || height > 512) return nullptr;
+    const size_t bytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
+    std::vector<jbyte> pixels(bytes, 0);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const size_t i = (static_cast<size_t>(y) * width + x) * 4;
+            const bool grid = ((x / 16) + (y / 16)) % 2 == 0;
+            pixels[i + 0] = static_cast<jbyte>((x * 255) / width);
+            pixels[i + 1] = static_cast<jbyte>((y * 255) / height);
+            pixels[i + 2] = static_cast<jbyte>(grid ? 190 : 55);
+            pixels[i + 3] = static_cast<jbyte>(255);
+        }
+    }
+    jbyteArray result = env->NewByteArray(static_cast<jsize>(bytes));
+    if (result != nullptr) env->SetByteArrayRegion(result, 0, static_cast<jsize>(bytes), pixels.data());
+    return result;
+}
