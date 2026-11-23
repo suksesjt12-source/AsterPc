@@ -18,14 +18,12 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-      - name: Install NDK and CMake
-        run: sdkmanager "ndk;27.0.12077973" "cmake;3.22.1"
-      - name: Build debug APK
+      - name: Install Android SDK packages
         run: |
-          chmod +x gradlew 2>/dev/null || true
-          gradle --no-daemon assembleDebug
+          yes | sdkmanager --licenses
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+      - name: Build debug APK
+        run: gradle --no-daemon assembleDebug
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
