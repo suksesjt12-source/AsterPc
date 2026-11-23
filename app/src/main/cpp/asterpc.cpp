@@ -518,6 +518,8 @@ static std::string mapPeImage(const std::vector<uint8_t>& b) {
     return out.str();
 }
 
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_asterpc_MainActivity_mapPeImage(JNIEnv* env,jobject,jbyteArray input) {
     if (input==nullptr) return env->NewStringUTF("No file data received.");
