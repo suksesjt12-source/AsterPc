@@ -505,9 +505,42 @@ std::string selfTests() {
     const std::string overlapResult=mapPeImage(overlappingFixture);
     const bool overlapRejected=overlapResult.find("overlapping PE sections")!=std::string::npos;
 
+    // Synthetic PE32+ imports: one implemented Win32 API and one recognized-but-unimplemented API.
+    std::vector<uint8_t> importFixture(0x600,0);
+    auto i16=[&](size_t o,uint16_t v){importFixture[o]=uint8_t(v);importFixture[o+1]=uint8_t(v>>8);};
+    auto i32=[&](size_t o,uint32_t v){for(unsigned n=0;n<4;++n)importFixture[o+n]=uint8_t(v>>(n*8));};
+    auto i64=[&](size_t o,uint64_t v){for(unsigned n=0;n<8;++n)importFixture[o+n]=uint8_t(v>>(n*8));};
+    importFixture[0]='M'; importFixture[1]='Z'; i32(0x3c,0x80);
+    importFixture[0x80]='P'; importFixture[0x81]='E';
+    i16(0x84,0x8664); i16(0x86,1); i16(0x94,128);
+    i16(0x98,0x20b); i32(0xA8,0x1000); i64(0xB0,0x10000000ULL);
+    i32(0xB8,0x1000); i32(0xBC,0x200); i32(0xD0,0x2000);
+    i32(0xD4,0x200); i32(0x104,2);
+    i32(0x110,0x1100); i32(0x114,40);
+    // Section table begins at 0x118; its raw data maps file 0x200 to RVA 0x1000.
+    importFixture[0x118]='.'; importFixture[0x119]='t'; importFixture[0x11A]='e';
+    importFixture[0x11B]='x'; importFixture[0x11C]='t';
+    i32(0x120,0x800); i32(0x124,0x1000); i32(0x128,0x400);
+    i32(0x12C,0x200); i32(0x13C,0x60000020);
+    // Import descriptor: OriginalFirstThunk=0x1140, DLL name=0x1180, IAT=0x1160.
+    i32(0x300,0x1140); i32(0x30C,0x1180); i32(0x310,0x1160);
+    i64(0x340,0x11A0); i64(0x348,0x11B0); i64(0x350,0);
+    i64(0x360,0x11A0); i64(0x368,0x11B0); i64(0x370,0);
+    const char* dllName="KERNEL32.dll";
+    std::memcpy(importFixture.data()+0x380,dllName,std::strlen(dllName)+1);
+    i16(0x3A0,0); std::memcpy(importFixture.data()+0x3A2,"GetTickCount64",15);
+    i16(0x3B0,0); std::memcpy(importFixture.data()+0x3B2,"GetModuleHandleA",17);
+    importFixture[0x400]=0x90; importFixture[0x401]=0xC3;
+    const std::string importMap=mapPeImage(importFixture);
+    const bool importResolverPass=
+        importMap.find("Callable Win32 API thunks (subset): 1")!=std::string::npos &&
+        importMap.find("Unresolved imports: 1")!=std::string::npos &&
+        importMap.find("GetTickCount64 -> callable Win32 API thunk")!=std::string::npos &&
+        importMap.find("GetModuleHandleA -> unresolved non-callable placeholder")!=std::string::npos;
+
     bool pass=a.rfind("PASS",0)==0&&b.rfind("PASS",0)==0&&c.rfind("PASS",0)==0&&
               d.rfind("PASS",0)==0&&vm.rfind("PASS",0)==0&&peMapPass&&overlapRejected&&
-              apiCallPass&&iatCallPass&&lastErrorCallPass&&exitCallPass;
+              apiCallPass&&iatCallPass&&lastErrorCallPass&&exitCallPass&&importResolverPass;
     return std::string("ASTERPC CPU + WIN32 THUNKS + GUEST MEMORY + PE MAPPER: ")+(pass?"ALL TESTS PASS":"TEST FAILURE")+
       "\n1 MOV/ADD: "+a+"\n2 memory store/load: "+b+"\n3 register arithmetic: "+c+"\n4 shift: "+d+
       "\n5 guest virtual memory: "+vm+
@@ -736,36 +769,13 @@ static std::string mapPeImage(const std::vector<uint8_t>& b) {
     // Imports are parsed and IAT entries receive non-executable placeholder thunk addresses.
     // These addresses are diagnostic only; no DLL or Windows API is invoked.
     std::vector<std::string> importDetails;
-    uint32_t importSymbols=0,importDllCount=0,recognizedApis=0;
+    uint32_t importSymbols=0,importDllCount=0,recognizedApis=0,unresolvedImports=0;
     GuestModuleRegistry moduleRegistry;
-    constexpr uint64_t importStubBase=0x0000700000000000ULL;
-    auto isKnownApi=[](const std::string& dll,const std::string& api)->bool {
-        std::string module=dll;
-        std::transform(module.begin(),module.end(),module.begin(),
-                       [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
-        if(module=="kernel32.dll" || module=="kernelbase.dll") {
-            static const char* names[]={"GetTickCount","GetCurrentProcessId","GetCurrentThreadId",
-                "GetVersion","IsDebuggerPresent","GetCommandLineA","GetCommandLineW",
-                "GetLastError","SetLastError","ExitProcess","GetModuleHandleA",
-                "GetModuleHandleW","GetProcAddress","VirtualAlloc","VirtualFree",
-                "HeapAlloc","HeapFree","Sleep","QueryPerformanceCounter",
-                "GetSystemTimeAsFileTime","GetStartupInfoA","GetStartupInfoW"};
-            for(const char* name:names) if(api==name) return true;
-        }
-        if(module=="ntdll.dll") {
-            static const char* names[]={"RtlGetVersion","RtlExitUserProcess","NtQueryInformationProcess"};
-            for(const char* name:names) if(api==name) return true;
-        }
-        if(module=="user32.dll") {
-            static const char* names[]={"GetSystemMetrics","GetForegroundWindow","MessageBoxA","MessageBoxW"};
-            for(const char* name:names) if(api==name) return true;
-        }
-        if(module=="msvcrt.dll" || module=="ucrtbase.dll") {
-            static const char* names[]={"memcpy","memmove","memset","memcmp","strlen","strcmp","strncmp",
-                "malloc","calloc","realloc","free","abort","exit"};
-            for(const char* name:names) if(api==name) return true;
-        }
-        return false;
+    constexpr uint64_t importStubBase=API_STUB_BASE;
+    constexpr uint64_t unresolvedStubBase=0x0000710000000000ULL;
+    asterpc::WinApiDispatcher importDispatcher;
+    auto isKnownApi=[&](const std::string& dll,const std::string& api)->bool {
+        return importDispatcher.supports(dll,api);
     };
     if(importRva) {
         if(importRva>image.size()||importSize>image.size()-importRva||importSize<20)
@@ -818,10 +828,14 @@ static std::string mapPeImage(const std::vector<uint8_t>& b) {
                 if(known) ++recognizedApis;
                 if(!moduleRegistry.noteImport(dll,known))
                     return "INVALID: import module registry state mismatch.";
-                const uint64_t stub=importStubBase+uint64_t(importSymbols)*16;
+                const uint64_t stub=known
+                    ? importStubBase+uint64_t(recognizedApis-1)*16
+                    : unresolvedStubBase+uint64_t(unresolvedImports)*16;
                 for(unsigned n=0;n<8;++n) image[static_cast<size_t>(dst)+n]=uint8_t(stub>>(n*8));
                 if(importDetails.size()<64)
-                    importDetails.push_back("  "+symbol+" -> "+(known?"known API placeholder":"unresolved placeholder"));
+                    importDetails.push_back("  "+symbol+" -> "+
+                        (known?"callable Win32 API thunk":"unresolved non-callable placeholder"));
+                if(!known) ++unresolvedImports;
                 ++importSymbols;
             }
             if(!thunkTerminated) return "INVALID: import thunk limit exceeded.";
@@ -874,7 +888,7 @@ static std::string mapPeImage(const std::vector<uint8_t>& b) {
        <<"Headers and sections were copied into bounded guest address-space regions.\n"
        <<"Module records and API names are metadata only; diagnostic handles and IAT placeholders are not callable.\n"
        <<"No PE entry point was executed and no Windows application was launched.\n"
-       <<"Not implemented: real DLL loading, executable Windows API dispatch, TLS, process startup.";
+       <<"Not implemented: automatic execution of this mapped image, real DLL loading, TLS, process startup, and full Win32 compatibility.";
     return out.str();
 }
 
