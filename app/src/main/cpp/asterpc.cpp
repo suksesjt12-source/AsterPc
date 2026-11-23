@@ -510,6 +510,10 @@ struct GuestProcessContext {
     uint64_t initialStackPointer=0;
     uint64_t commandLineAddress=0;
     uint64_t environmentAddress=0;
+    uint64_t processMetadataAddress=0;
+    uint64_t threadMetadataAddress=0;
+    uint64_t processId=0;
+    uint64_t primaryThreadId=0;
     uint32_t importedSymbolCount=0;
     size_t moduleCount=0;
     GuestModuleRegistry modules;
@@ -606,9 +610,49 @@ public:
             context.error="guest process stack metadata underflow";
             return false;
         }
-        const uint64_t initialStack=(cursor-32)&~0xFULL;
-        if(initialStack<stackBase || !machine.range(initialStack,32)) {
-            context.error="guest process stack layout exceeds reserved stack range";
+        // AsterPC-owned records; these are not Windows PEB/TEB structures.
+        constexpr uint64_t THREAD_RECORD_SIZE=48;
+        constexpr uint64_t PROCESS_RECORD_SIZE=64;
+        if(cursor<THREAD_RECORD_SIZE+PROCESS_RECORD_SIZE+64) {
+            context.error="guest process metadata reservation underflow";
+            return false;
+        }
+        const uint64_t threadRecord=(cursor-THREAD_RECORD_SIZE)&~0xFULL;
+        const uint64_t processRecord=(threadRecord-PROCESS_RECORD_SIZE)&~0xFULL;
+        const uint64_t initialStack=(processRecord-32)&~0xFULL;
+        if(initialStack<stackBase ||
+           !machine.range(threadRecord,THREAD_RECORD_SIZE) ||
+           !machine.range(processRecord,PROCESS_RECORD_SIZE) ||
+           !machine.range(initialStack,32)) {
+            context.error="guest process/thread metadata exceeds reserved stack range";
+            return false;
+        }
+        auto writeRecord32=[&](uint64_t address,uint32_t value) {
+            return machine.writeMem(address,4,value);
+        };
+        auto writeRecord64=[&](uint64_t address,uint64_t value) {
+            return machine.writeMem(address,8,value);
+        };
+        const bool threadRecordWritten=
+            writeRecord32(threadRecord,0x54534141u) && // AAST, custom magic
+            writeRecord32(threadRecord+4,1) &&
+            writeRecord64(threadRecord+8,1) &&
+            writeRecord64(threadRecord+16,stackBase) &&
+            writeRecord64(threadRecord+24,stackTop) &&
+            writeRecord64(threadRecord+32,initialStack) &&
+            writeRecord64(threadRecord+40,0);
+        const bool processRecordWritten=
+            writeRecord32(processRecord,0x50534141u) && // AASP, custom magic
+            writeRecord32(processRecord+4,1) &&
+            writeRecord64(processRecord+8,1) &&
+            writeRecord64(processRecord+16,base) &&
+            writeRecord64(processRecord+24,entry) &&
+            writeRecord64(processRecord+32,context.commandLineAddress) &&
+            writeRecord64(processRecord+40,context.environmentAddress) &&
+            writeRecord64(processRecord+48,context.modules.size()) &&
+            writeRecord64(processRecord+56,threadRecord);
+        if(!threadRecordWritten || !processRecordWritten) {
+            context.error="could not write synthetic process/thread metadata records";
             return false;
         }
 
@@ -630,6 +674,10 @@ public:
         context.stackBase=stackBase;
         context.stackTop=stackTop;
         context.initialStackPointer=initialStack;
+        context.processMetadataAddress=processRecord;
+        context.threadMetadataAddress=threadRecord;
+        context.processId=1;
+        context.primaryThreadId=1;
         context.importedSymbolCount=context.modules.importCount();
         context.moduleCount=context.modules.size();
         context.initialized=true;
@@ -804,6 +852,25 @@ std::string selfTests() {
             runtimeImage.loadBase,runtimeImage.loadBase+runtimeImage.entryRva) &&
         processBootstrap.context.modules.hasImportOnlyModule("kernel32.dll") &&
         processBootstrap.context.importedSymbolCount==2 &&
+        processBootstrap.context.processId==1 &&
+        processBootstrap.context.primaryThreadId==1 &&
+        (processBootstrap.context.processMetadataAddress&0xFULL)==0 &&
+        (processBootstrap.context.threadMetadataAddress&0xFULL)==0 &&
+        [&]() {
+            uint64_t magic=0,pid=0,tid=0,threadPtr=0,stackTop=0,initialRsp=0;
+            return peRuntimeMachine.readMem(processBootstrap.context.processMetadataAddress,4,magic) &&
+                magic==0x50534141u &&
+                peRuntimeMachine.readMem(processBootstrap.context.processMetadataAddress+8,8,pid) &&
+                pid==1 &&
+                peRuntimeMachine.readMem(processBootstrap.context.processMetadataAddress+56,8,threadPtr) &&
+                threadPtr==processBootstrap.context.threadMetadataAddress &&
+                peRuntimeMachine.readMem(threadPtr,4,magic) && magic==0x54534141u &&
+                peRuntimeMachine.readMem(threadPtr+8,8,tid) && tid==1 &&
+                peRuntimeMachine.readMem(threadPtr+24,8,stackTop) &&
+                stackTop==processBootstrap.context.stackTop &&
+                peRuntimeMachine.readMem(threadPtr+32,8,initialRsp) &&
+                initialRsp==processBootstrap.context.initialStackPointer;
+        }() &&
         GuestProcessBootstrap::wideAsciiEquals(peRuntimeMachine,
             processBootstrap.context.commandLineAddress,"asterpc-test.exe --runtime-smoke") &&
         GuestProcessBootstrap::wideAsciiEquals(peRuntimeMachine,
@@ -845,7 +912,8 @@ std::string selfTests() {
       "\n13 mapped PE IAT -> CPU CALL -> GetTickCount64: "+(peRuntimeCallPass?"PASS":"FAIL")+
       "\n14 process bootstrap + UTF-16 process parameters: "+(processBootstrapPass?"PASS: "+std::to_string(processBootstrap.context.moduleCount)+" module records":"FAIL: "+processBootstrap.context.error)+
       "\n15 process image/stack/module registry validation: "+(processContextPass?"PASS":"FAIL")+
-      "\n16 unsupported PE IAT import remains non-callable: "+(unsupportedImportRejected?"PASS":"FAIL")+
+      "\n16 synthetic process/thread metadata records: "+(processContextPass?"PASS: PID/TID, image, parameters, stack bounds, and thread link":"FAIL")+
+      "\n17 unsupported PE IAT import remains non-callable: "+(unsupportedImportRejected?"PASS":"FAIL")+
       "\nGuest RAM: 1 MiB minimum, bounds-checked, little-endian; stack resides in guest RAM."+
       "\nPE runtime test: mapped PE image bytes and IAT are consumed directly by the experimental CPU; supported imports bind to deterministic API thunks."+
       "\nVirtual memory prototype: isolated regions, overlap rejection, read/write/execute permissions, 256 MiB commit cap."+
