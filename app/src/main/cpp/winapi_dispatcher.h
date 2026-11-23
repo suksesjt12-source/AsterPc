@@ -30,6 +30,7 @@ struct DispatchResult {
 
 class WinApiDispatcher {
 public:
+    bool supports(const std::string& dll,const std::string& symbol) const;
     DispatchResult dispatch(const std::string& dll,
                             const std::string& symbol,
                             Win64CallFrame& frame) const;
