@@ -1,4 +1,4 @@
-# AsterPC 0.7.0
+# AsterPC 0.8.0
 
 AsterPC adalah prototipe riset emulator PC untuk Android ARM64. Proyek ini **belum dapat menjalankan aplikasi atau game Windows**.
 
