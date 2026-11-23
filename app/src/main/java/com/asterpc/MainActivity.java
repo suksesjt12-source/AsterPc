@@ -52,8 +52,8 @@ public class MainActivity extends Activity {
         root.addView(subtitle);
 
         TextView status = new TextView(this);
-        status.setText("\nStatus: prototype 0.8.3\nHost ABI: " + android.os.Build.SUPPORTED_ABIS[0]
-                + "\nCPU: x86-64 interpreter + PE runtime smoke test\nMemory: guest image + bounded bootstrap stack\nProcess: UTF-16 parameters + module registry\nDLLs: import metadata only; not loaded\nAPI: limited Win64 dispatcher\nGPU: native RGBA framebuffer + OpenGL ES 2.0");
+        status.setText("\nStatus: prototype 0.8.4\nHost ABI: " + android.os.Build.SUPPORTED_ABIS[0]
+                + "\nCPU: x86-64 interpreter + PE runtime smoke test\nMemory: guest image + bounded bootstrap stack\nProcess: synthetic PID/TID records + UTF-16 parameters\nDLLs: import metadata only; not loaded\nAPI: limited Win64 dispatcher\nGPU: native RGBA framebuffer + OpenGL ES 2.0");
         status.setTextColor(0xFFE4ECF5);
         status.setTextSize(15);
         root.addView(status);
@@ -89,7 +89,7 @@ public class MainActivity extends Activity {
         root.addView(output);
 
         TextView warning = new TextView(this);
-        warning.setText("\nImportant: the CPU self-test now boots a synthetic guest process context with a bounded stack, UTF-16 command line/environment, and module metadata, then calls a supported API through the PE IAT. Imported DLLs are metadata only and are not loaded. User-selected EXE files are only inspected or mapped; they are not launched. Real Windows process startup, PEB/TEB, TLS, full Win32 compatibility, and DirectX/Vulkan translation are not implemented. GPU output remains a diagnostic test framebuffer.");
+        warning.setText("\nImportant: the CPU self-test creates a synthetic guest process context with bounded stack, UTF-16 parameters, module metadata, and AsterPC-owned process/thread records (PID/TID, image/entry, stack bounds, and record linkage), then calls a supported API through the PE IAT. These records are NOT Windows PEB/TEB. Imported DLLs are metadata only and are not loaded. User-selected EXE files are only inspected or mapped; they are not launched. Real Windows process startup, TLS, full Win32 compatibility, and DirectX/Vulkan translation are not implemented. GPU output remains a diagnostic test framebuffer.");
         warning.setTextColor(0xFFFFD28A);
         warning.setTextSize(13);
         root.addView(warning);
