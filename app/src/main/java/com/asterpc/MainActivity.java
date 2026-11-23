@@ -16,10 +16,19 @@ public class MainActivity extends Activity {
     private static final int PICK_EXE = 41;
     private static final int MAX_EXE_SIZE = 64 * 1024 * 1024;
     private TextView output;
+    private boolean mapRequested = false;
+
+    private void pickExecutable() {
+        Intent pick = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        pick.addCategory(Intent.CATEGORY_OPENABLE);
+        pick.setType("*/*");
+        startActivityForResult(pick, PICK_EXE);
+    }
 
     static { System.loadLibrary("asterpc"); }
     private native String runSelfTest();
     private native String inspectPe(byte[] fileBytes);
+    private native String mapPeImage(byte[] fileBytes);
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -60,12 +69,12 @@ public class MainActivity extends Activity {
         Button pe = new Button(this);
         pe.setText("Inspect Windows EXE (PE x64)");
         root.addView(pe);
-        pe.setOnClickListener(v -> {
-            Intent pick = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-            pick.addCategory(Intent.CATEGORY_OPENABLE);
-            pick.setType("*/*");
-            startActivityForResult(pick, PICK_EXE);
-        });
+
+        Button map = new Button(this);
+        map.setText("Map PE sections into temporary guest buffer");
+        root.addView(map);
+        pe.setOnClickListener(v -> { pickExecutable(); });
+        map.setOnClickListener(v -> { mapRequested = true; pickExecutable(); });
 
         output = new TextView(this);
         output.setTextColor(0xFF8FE3B0);
@@ -108,7 +117,9 @@ public class MainActivity extends Activity {
                     out.write(chunk, 0, count);
                 }
                 byte[] bytes = out.toByteArray();
-                String result = inspectPe(bytes);
+                final boolean doMap = mapRequested;
+                mapRequested = false;
+                String result = doMap ? mapPeImage(bytes) : inspectPe(bytes);
                 runOnUiThread(() -> output.setText(result));
             } catch (Exception e) {
                 runOnUiThread(() -> output.setText("PE inspection failed: " + e.getMessage()));
