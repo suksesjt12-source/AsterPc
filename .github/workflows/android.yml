@@ -4,6 +4,10 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+concurrency:
+  group: asterpc-android-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
