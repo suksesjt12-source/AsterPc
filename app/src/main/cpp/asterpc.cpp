@@ -417,9 +417,9 @@ static std::string mapPeImage(const std::vector<uint8_t>& b) {
                 uint16_t item;
                 if(!peRead16(image,pos+8+size_t(k)*2,item)) return "INVALID: truncated relocation entry.";
                 const unsigned type=item>>12;
-                const uint32_t target=pageRva+(item&0x0fff);
+                const uint64_t target=uint64_t(pageRva)+(item&0x0fff);
                 if(type==10) {
-                    if(target>image.size() || image.size()-target<8)
+                    if(target>image.size() || image.size()-static_cast<size_t>(target)<8)
                         return "INVALID: DIR64 relocation target is outside image.";
                     ++dir64Entries;
                 } else if(type!=0) {
@@ -483,7 +483,7 @@ static std::string mapPeImage(const std::vector<uint8_t>& b) {
         << "Mapped image size: " << image.size() << " bytes\n"
         << "Headers copied: " << headersSize << " bytes\n"
         << "Sections mapped: " << sections << "\n"
-        << "Relocation blocks validated: " << relocBlocks << " (DIR64 entries: " << dir64Entries << ")\n"
+        << "Relocation blocks validated: " << relocBlocks << " (entries: " << relocEntries << ", DIR64: " << dir64Entries << ")\n"
         << "Import DLLs: " << importNames.size() << " listed (symbols validated: " << importSymbols << ")\n";
     for (const auto& dll : importNames) out << "  DLL: " << dll << "\n";
     out << "Uninitialized section bytes: zero-filled\n"
