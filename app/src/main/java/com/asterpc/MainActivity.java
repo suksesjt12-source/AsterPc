@@ -28,7 +28,7 @@ public class MainActivity extends Activity {
     static { System.loadLibrary("asterpc"); }
     private native String runSelfTest();
     private native String inspectPe(byte[] fileBytes);
-    private native String mapPeImage(byte[] fileBytes);
+    private native String mapPeImage(byte[] fileBytes);\n    private native String runWinApiSelfTest();
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
