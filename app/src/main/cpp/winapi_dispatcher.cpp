@@ -106,8 +106,7 @@ std::string runWinApiDispatcherSelfTests() {
           result.status==DispatchStatus::NotFound);
 
     report << "Win32 subset dispatcher: " << passed << "/" << total << " tests passed.\n"
-           << "Scope: isolated deterministic call-frame model only; it is not connected to the guest CPU, "
-              "IAT thunks, Windows threads, or host operating-system APIs.";
+           << "Scope: deterministic call-frame dispatcher. The experimental CPU can invoke explicitly registered test thunks; PE import entries are not yet automatically bound, and broad Win32 compatibility is not implemented.";
     return report.str();
 }
 
