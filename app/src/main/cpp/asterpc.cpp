@@ -279,8 +279,71 @@ public:
         const Region* r=locate(address,1);
         return r&&r->readable&&r->executable;
     }
+    bool mapBytes(uint64_t base,const std::vector<uint8_t>& source,size_t sourceOffset,
+                  size_t size,bool read,bool write,bool execute) {
+        if(sourceOffset>source.size() || size>source.size()-sourceOffset ||
+           !size || size>MAX_COMMITTED-committed || base>UINT64_MAX-size) return false;
+        const uint64_t end=base+size;
+        for(const auto& r:regions) {
+            const uint64_t otherEnd=r.base+r.bytes.size();
+            if(base<otherEnd && r.base<end) return false;
+        }
+        Region region{base,std::vector<uint8_t>(source.begin()+static_cast<std::ptrdiff_t>(sourceOffset),
+                                                source.begin()+static_cast<std::ptrdiff_t>(sourceOffset+size)),
+                      read,write,execute};
+        regions.push_back(std::move(region));
+        committed+=size;
+        return true;
+    }
     size_t committedBytes() const { return committed; }
     size_t regionCount() const { return regions.size(); }
+};
+
+struct GuestModuleRecord {
+    std::string name;
+    std::string normalized;
+    uint64_t diagnosticHandle=0;
+    uint32_t imports=0;
+    uint32_t recognized=0;
+};
+
+class GuestModuleRegistry {
+    std::vector<GuestModuleRecord> modules;
+    static std::string normalize(const std::string& name) {
+        std::string result=name;
+        std::transform(result.begin(),result.end(),result.begin(),
+                       [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+        return result;
+    }
+public:
+    bool registerImportModule(const std::string& name) {
+        const std::string key=normalize(name);
+        for(const auto& module:modules) if(module.normalized==key) return true;
+        if(name.empty()||name.size()>260||modules.size()>=128) return false;
+        const uint64_t handle=0x0000600000000000ULL+uint64_t(modules.size())*0x10000ULL;
+        modules.push_back({name,key,handle,0,0});
+        return true;
+    }
+    bool noteImport(const std::string& name,bool known) {
+        const std::string key=normalize(name);
+        for(auto& module:modules) if(module.normalized==key) {
+            ++module.imports;
+            if(known) ++module.recognized;
+            return true;
+        }
+        return false;
+    }
+    size_t size() const { return modules.size(); }
+    uint32_t importCount() const {
+        uint32_t total=0; for(const auto& module:modules) total+=module.imports; return total;
+    }
+    std::string describe() const {
+        std::ostringstream out;
+        for(const auto& module:modules)
+            out<<"  "<<module.name<<" handle=0x"<<std::hex<<module.diagnosticHandle<<std::dec
+               <<" imports="<<module.imports<<" recognized="<<module.recognized<<" (metadata only)\\n";
+        return out.str();
+    }
 };
 
 static std::string guestMemorySelfTest() {
@@ -295,7 +358,14 @@ static std::string guestMemorySelfTest() {
     if(!space.map(0x20000000,4096,true,false,true)) return "FAIL: map read-only code region";
     if(space.write8(0x20000000,1)) return "FAIL: write to read-only code accepted";
     if(!space.canFetch(0x20000000)) return "FAIL: executable region rejected";
-    return "PASS: mapping, overlap guard, access permissions, execute permission, and bounds";
+    GuestModuleRegistry modules;
+    if(!modules.registerImportModule("KERNEL32.DLL") ||
+       !modules.registerImportModule("kernel32.dll") || modules.size()!=1)
+        return "FAIL: module registry case-insensitive deduplication";
+    if(!modules.noteImport("Kernel32.dll",true) ||
+       !modules.noteImport("kernel32.dll",false) || modules.importCount()!=2)
+        return "FAIL: module import accounting";
+    return "PASS: region mapping, overlap guard, permissions, bounds, and DLL registry";
 }
 
 std::string selfTests() {
@@ -530,6 +600,7 @@ static std::string mapPeImage(const std::vector<uint8_t>& b) {
     // These addresses are diagnostic only; no DLL or Windows API is invoked.
     std::vector<std::string> importDetails;
     uint32_t importSymbols=0,importDllCount=0,recognizedApis=0;
+    GuestModuleRegistry moduleRegistry;
     constexpr uint64_t importStubBase=0x0000700000000000ULL;
     auto isKnownApi=[](const std::string& dll,const std::string& api)->bool {
         std::string module=dll;
@@ -576,6 +647,8 @@ static std::string mapPeImage(const std::vector<uint8_t>& b) {
             for(size_t q=nameRva;q<image.size()&&q-nameRva<260&&image[q];++q)
                 dll.push_back(static_cast<char>(image[q]));
             if(dll.empty()||dll.size()>=260) return "INVALID: invalid import DLL name.";
+            if(!moduleRegistry.registerImportModule(dll))
+                return "REJECTED: import module registry limit exceeded.";
             ++importDllCount;
             if(importDetails.size()<64) importDetails.push_back("DLL "+dll);
             const uint32_t lookup=oft?oft:firstThunk;
@@ -606,6 +679,8 @@ static std::string mapPeImage(const std::vector<uint8_t>& b) {
                 }
                 const bool known=isKnownApi(dll,symbol);
                 if(known) ++recognizedApis;
+                if(!moduleRegistry.noteImport(dll,known))
+                    return "INVALID: import module registry state mismatch.";
                 const uint64_t stub=importStubBase+uint64_t(importSymbols)*16;
                 for(unsigned n=0;n<8;++n) image[static_cast<size_t>(dst)+n]=uint8_t(stub>>(n*8));
                 if(importDetails.size()<64)
@@ -617,6 +692,31 @@ static std::string mapPeImage(const std::vector<uint8_t>& b) {
         if(!terminated) return "INVALID: import descriptor table has no terminator.";
     }
 
+    // Commit PE headers and sections into a bounded guest address space.
+    GuestAddressSpace guestSpace;
+    if(!guestSpace.mapBytes(guestLoadBase,image,0,headersSize,true,false,false))
+        return "REJECTED: PE headers could not be mapped into guest address space.";
+    uint32_t executableSections=0,writableSections=0;
+    for(unsigned i=0;i<sections;++i) {
+        const size_t sh=table+size_t(i)*40;
+        uint32_t vs=0,va=0,rs=0,ro=0,characteristics=0;
+        if(!peRead32(b,sh+8,vs)||!peRead32(b,sh+12,va)||!peRead32(b,sh+16,rs)||
+           !peRead32(b,sh+20,ro)||!peRead32(b,sh+36,characteristics))
+            return "INVALID: section permission metadata is truncated.";
+        (void)ro;
+        const size_t span=static_cast<size_t>(std::max<uint64_t>(vs,rs));
+        if(!span) continue;
+        const bool executable=(characteristics&0x20000000u)!=0;
+        const bool writable=(characteristics&0x80000000u)!=0;
+        const bool readable=(characteristics&0x40000000u)!=0 || executable;
+        if(!guestSpace.mapBytes(guestLoadBase+va,image,va,span,readable,writable,executable))
+            return "REJECTED: overlapping PE sections or guest memory limit exceeded.";
+        if(executable) ++executableSections;
+        if(writable) ++writableSections;
+    }
+    if(!guestSpace.canFetch(guestLoadBase+entry))
+        return "REJECTED: PE entry point is not inside a readable executable section.";
+
     std::ostringstream out;
     out<<"PE32+ IMAGE PREPARED IN TEMPORARY GUEST BUFFER\n"
        <<"Architecture: x86-64\nPreferred image base: 0x"<<std::hex<<preferredBase
@@ -625,12 +725,19 @@ static std::string mapPeImage(const std::vector<uint8_t>& b) {
        <<"\nBase relocations applied: "<<relocEntries<<" (DIR64: "<<dir64Entries
        <<", blocks: "<<relocBlocks<<")\nImport DLLs: "<<importDllCount
        <<"\nIAT entries assigned placeholder addresses: "<<importSymbols
-       <<"\nNames matching API catalog (not executable): "<<recognizedApis<<"\n";
+       <<"\nNames matching API catalog (not executable): "<<recognizedApis
+       <<"\nGuest memory regions: "<<guestSpace.regionCount()
+       <<" ("<<guestSpace.committedBytes()<<" bytes committed)"
+       <<"\nExecutable sections: "<<executableSections
+       <<"\nWritable sections: "<<writableSections
+       <<"\nDLL metadata records: "<<moduleRegistry.size()<<"\n";
+    out<<moduleRegistry.describe();
     for(const auto& detail:importDetails) out<<"  "<<detail<<"\n";
     out<<"BSS/uninitialized bytes: zero-filled\n"
-       <<"Buffer is temporary and discarded after inspection; no code was executed.\n"
-       <<"API catalog covers selected common imports for recognition only.\n"
-       <<"Not implemented: executable API dispatch, real DLL loading, TLS, page protections, process startup.";
+       <<"Headers and sections were copied into bounded guest address-space regions.\n"
+       <<"Module records and API names are metadata only; diagnostic handles and IAT placeholders are not callable.\n"
+       <<"No PE entry point was executed and no Windows application was launched.\n"
+       <<"Not implemented: real DLL loading, executable Windows API dispatch, TLS, process startup.";
     return out.str();
 }
 
