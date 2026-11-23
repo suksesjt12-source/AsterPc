@@ -341,76 +341,82 @@ Java_com_asterpc_MainActivity_inspectPe(JNIEnv* env, jobject, jbyteArray input) 
 
 namespace {
 static std::string mapPeImage(const std::vector<uint8_t>& b) {
-    if (b.size() < 64 || b[0] != 'M' || b[1] != 'Z')
-        return "INVALID: DOS MZ signature not found.";
+    if (b.size()<64 || b[0]!='M' || b[1]!='Z') return "INVALID: DOS MZ signature not found.";
     uint32_t peOff;
-    if (!peRead32(b,0x3c,peOff) || size_t(peOff) > b.size() || b.size()-size_t(peOff) < 24)
+    if (!peRead32(b,0x3c,peOff) || size_t(peOff)>b.size() || b.size()-size_t(peOff)<24)
         return "INVALID: PE header offset is outside the file.";
-    const size_t p = static_cast<size_t>(peOff);
-    if (b[p]!='P' || b[p+1]!='E' || b[p+2]!=0 || b[p+3]!=0)
-        return "INVALID: PE signature not found.";
-    uint16_t machine, sections, optionalSize;
-    if (!peRead16(b,p+4,machine) || !peRead16(b,p+6,sections) ||
-        !peRead16(b,p+20,optionalSize)) return "INVALID: truncated COFF header.";
+    const size_t p=static_cast<size_t>(peOff);
+    if (b[p]!='P'||b[p+1]!='E'||b[p+2]!=0||b[p+3]!=0) return "INVALID: PE signature not found.";
+    uint16_t machine,sections,optionalSize;
+    if(!peRead16(b,p+4,machine)||!peRead16(b,p+6,sections)||!peRead16(b,p+20,optionalSize))
+        return "INVALID: truncated COFF header.";
     const size_t opt=p+24;
-    if (machine!=0x8664) return "UNSUPPORTED: only x86-64 PE images are accepted.";
-    if (opt>b.size() || optionalSize>b.size()-opt || optionalSize<0x70)
+    if(machine!=0x8664) return "UNSUPPORTED: only x86-64 PE images are accepted.";
+    if(opt>b.size()||optionalSize>b.size()-opt||optionalSize<112)
         return "INVALID: truncated PE32+ optional header.";
     uint16_t magic;
-    uint32_t entry, sectionAlign, fileAlign, imageSize, headersSize;
-    uint64_t imageBase;
-    if (!peRead16(b,opt,magic) || !peRead32(b,opt+16,entry) ||
-        !peRead64(b,opt+24,imageBase) || !peRead32(b,opt+32,sectionAlign) ||
-        !peRead32(b,opt+36,fileAlign) || !peRead32(b,opt+56,imageSize) ||
-        !peRead32(b,opt+60,headersSize))
+    uint32_t entry,sectionAlign,fileAlign,imageSize,headersSize,directoryCount;
+    uint64_t preferredBase;
+    if(!peRead16(b,opt,magic)||!peRead32(b,opt+16,entry)||!peRead64(b,opt+24,preferredBase)||
+       !peRead32(b,opt+32,sectionAlign)||!peRead32(b,opt+36,fileAlign)||
+       !peRead32(b,opt+56,imageSize)||!peRead32(b,opt+60,headersSize)||
+       !peRead32(b,opt+108,directoryCount))
         return "INVALID: incomplete PE32+ optional header.";
-    if (magic!=0x20b) return "UNSUPPORTED: PE32+ format required.";
-    if (!sections || sections>96) return "INVALID: unreasonable section count.";
-    if (!imageSize || imageSize>(128u*1024u*1024u))
+    if(magic!=0x20b) return "UNSUPPORTED: PE32+ format required.";
+    if(!sections||sections>96) return "INVALID: unreasonable section count.";
+    if(!imageSize||imageSize>128u*1024u*1024u)
         return "REJECTED: SizeOfImage must be between 1 byte and 128 MiB.";
-    if (!headersSize || headersSize>b.size() || headersSize>imageSize)
+    if(!headersSize||headersSize>b.size()||headersSize>imageSize)
         return "INVALID: SizeOfHeaders is outside file/image bounds.";
-    if (!sectionAlign || !fileAlign || (sectionAlign & (sectionAlign-1)) ||
-        (fileAlign & (fileAlign-1)) || fileAlign>65536 || sectionAlign<fileAlign)
+    if(!sectionAlign||!fileAlign||(sectionAlign&(sectionAlign-1))||(fileAlign&(fileAlign-1))||
+       fileAlign>65536||sectionAlign<fileAlign)
         return "INVALID: unsupported or inconsistent PE alignment.";
-    if (entry>=imageSize) return "INVALID: entry point RVA exceeds image.";
+    if(entry>=imageSize) return "INVALID: entry point RVA exceeds image.";
+    if(directoryCount>(optionalSize-112)/8)
+        return "INVALID: data-directory count exceeds optional-header bounds.";
     const size_t table=opt+optionalSize;
-    if (table>b.size() || size_t(sections)>(b.size()-table)/40)
+    if(table>b.size()||size_t(sections)>(b.size()-table)/40)
         return "INVALID: section table exceeds file bounds.";
     std::vector<uint8_t> image(static_cast<size_t>(imageSize),0);
     std::memcpy(image.data(),b.data(),headersSize);
-    for (unsigned i=0;i<sections;++i) {
-        const size_t s=table+size_t(i)*40;
-        uint32_t virtualSize, virtualAddress, rawSize, rawOffset;
-        if (!peRead32(b,s+8,virtualSize) || !peRead32(b,s+12,virtualAddress) ||
-            !peRead32(b,s+16,rawSize) || !peRead32(b,s+20,rawOffset))
+    for(unsigned i=0;i<sections;++i) {
+        const size_t sh=table+size_t(i)*40;
+        uint32_t vs,va,rs,ro;
+        if(!peRead32(b,sh+8,vs)||!peRead32(b,sh+12,va)||!peRead32(b,sh+16,rs)||!peRead32(b,sh+20,ro))
             return "INVALID: malformed section header.";
-        const uint64_t mappedSize=std::max<uint64_t>(virtualSize,rawSize);
-        if (mappedSize && (virtualAddress>imageSize || mappedSize>uint64_t(imageSize)-virtualAddress))
+        const uint64_t span=std::max<uint64_t>(vs,rs);
+        if(span&&(va>imageSize||span>uint64_t(imageSize)-va))
             return "INVALID: section virtual range exceeds SizeOfImage.";
-        if (rawSize && (rawOffset>b.size() || rawSize>b.size()-rawOffset))
-            return "INVALID: section raw data exceeds file bounds.";
-        if (rawSize) std::memcpy(image.data()+virtualAddress,b.data()+rawOffset,rawSize);
+        if(rs&&(ro>b.size()||rs>b.size()-ro)) return "INVALID: section raw data exceeds file bounds.";
+        if(rs) std::memcpy(image.data()+va,b.data()+ro,rs);
     }
-    // Validate relocation and import directories in the mapped image.
-    uint32_t directoryCount=0, relocRva=0, relocSize=0, importRva=0, importSize=0;
-    if (optionalSize >= 112) peRead32(b,opt+108,directoryCount);
-    if (directoryCount > 5 && optionalSize >= 112 + 6*8) {
-        peRead32(b,opt+112+5*8,relocRva); peRead32(b,opt+112+5*8+4,relocSize);
-    }
-    if (directoryCount > 1 && optionalSize >= 112 + 2*8) {
-        peRead32(b,opt+112+1*8,importRva); peRead32(b,opt+112+1*8+4,importSize);
-    }
-    uint32_t relocBlocks=0, relocEntries=0, dir64Entries=0;
-    if (relocRva || relocSize) {
-        if (!relocRva || relocSize < 8 || relocRva > image.size() || relocSize > image.size()-relocRva)
+
+    uint32_t relocRva=0,relocSize=0,importRva=0,importSize=0;
+    auto readDirectory=[&](uint32_t index,uint32_t& rva,uint32_t& size)->bool {
+        if(index>=directoryCount) return true;
+        const size_t off=opt+112+size_t(index)*8;
+        return peRead32(b,off,rva)&&peRead32(b,off+4,size);
+    };
+    if(!readDirectory(5,relocRva,relocSize)||!readDirectory(1,importRva,importSize))
+        return "INVALID: truncated data-directory entry.";
+    if((relocRva==0)!=(relocSize==0)||(importRva==0)!=(importSize==0))
+        return "INVALID: data-directory RVA/size pair is inconsistent.";
+
+    // This prototype uses a fixed guest load address and applies only AMD64 DIR64 relocations.
+    constexpr uint64_t guestLoadBase=0x0000000010000000ULL;
+    const uint64_t delta=guestLoadBase-preferredBase;
+    uint32_t relocBlocks=0,relocEntries=0,dir64Entries=0;
+    if(delta!=0 && relocRva==0)
+        return "UNSUPPORTED: image requires relocation but has no base-relocation directory.";
+    if(relocRva) {
+        if(relocRva>image.size()||relocSize>image.size()-relocRva)
             return "INVALID: base relocation directory is outside mapped image.";
-        size_t pos=relocRva, end=size_t(relocRva)+relocSize;
-        while (pos<end) {
-            if (end-pos<8) return "INVALID: truncated relocation block.";
-            uint32_t pageRva, blockSize;
-            if (!peRead32(image,pos,pageRva) || !peRead32(image,pos+4,blockSize) ||
-                blockSize<8 || blockSize>end-pos || ((blockSize-8)&1))
+        size_t pos=relocRva,end=size_t(relocRva)+relocSize;
+        while(pos<end) {
+            if(end-pos<8) return "INVALID: truncated relocation block.";
+            uint32_t pageRva,blockSize;
+            if(!peRead32(image,pos,pageRva)||!peRead32(image,pos+4,blockSize)||
+               blockSize<8||blockSize>end-pos||((blockSize-8)&1)||pageRva>=image.size())
                 return "INVALID: malformed relocation block.";
             const uint32_t count=(blockSize-8)/2;
             for(uint32_t k=0;k<count;++k) {
@@ -419,79 +425,97 @@ static std::string mapPeImage(const std::vector<uint8_t>& b) {
                 const unsigned type=item>>12;
                 const uint64_t target=uint64_t(pageRva)+(item&0x0fff);
                 if(type==10) {
-                    if(target>image.size() || image.size()-static_cast<size_t>(target)<8)
+                    if(target>image.size()||image.size()-static_cast<size_t>(target)<8)
                         return "INVALID: DIR64 relocation target is outside image.";
+                    uint64_t oldValue=0;
+                    if(!peRead64(image,static_cast<size_t>(target),oldValue))
+                        return "INVALID: cannot read DIR64 relocation target.";
+                    const uint64_t relocated=oldValue+delta;
+                    for(unsigned n=0;n<8;++n) image[static_cast<size_t>(target)+n]=uint8_t(relocated>>(n*8));
                     ++dir64Entries;
                 } else if(type!=0) {
                     return "UNSUPPORTED: relocation type other than ABSOLUTE/DIR64 encountered.";
                 }
                 if(type!=0) ++relocEntries;
             }
-            ++relocBlocks; pos+=blockSize;
+            ++relocBlocks;
+            pos+=blockSize;
         }
     }
-    std::vector<std::string> importNames;
-    uint32_t importSymbols=0;
-    if (importRva || importSize) {
-        if (!importRva || importSize<20 || importRva>image.size() || importSize>image.size()-importRva)
+
+    // Imports are parsed and IAT entries receive non-executable placeholder thunk addresses.
+    // These addresses are diagnostic only; no DLL or Windows API is invoked.
+    std::vector<std::string> importDetails;
+    uint32_t importSymbols=0,importDllCount=0;
+    constexpr uint64_t importStubBase=0x0000700000000000ULL;
+    if(importRva) {
+        if(importRva>image.size()||importSize>image.size()-importRva||importSize<20)
             return "INVALID: import directory is outside mapped image.";
-        size_t pos=importRva, end=size_t(importRva)+importSize;
+        size_t pos=importRva,end=size_t(importRva)+importSize;
         bool terminated=false;
-        for(unsigned desc=0;desc<256 && pos+20<=end;++desc,pos+=20) {
+        for(unsigned desc=0;desc<256&&pos+20<=end;++desc,pos+=20) {
             uint32_t oft=0,time=0,chain=0,nameRva=0,firstThunk=0;
-            if(!peRead32(image,pos,oft)||!peRead32(image,pos+4,time)||
-               !peRead32(image,pos+8,chain)||!peRead32(image,pos+12,nameRva)||
-               !peRead32(image,pos+16,firstThunk)) return "INVALID: truncated import descriptor.";
+            if(!peRead32(image,pos,oft)||!peRead32(image,pos+4,time)||!peRead32(image,pos+8,chain)||
+               !peRead32(image,pos+12,nameRva)||!peRead32(image,pos+16,firstThunk))
+                return "INVALID: truncated import descriptor.";
             if(!(oft|time|chain|nameRva|firstThunk)) { terminated=true; break; }
-            if(!nameRva || nameRva>=image.size() || !firstThunk || firstThunk>=image.size())
+            if(!nameRva||nameRva>=image.size()||!firstThunk||firstThunk>=image.size())
                 return "INVALID: import descriptor contains invalid RVA.";
             std::string dll;
-            for(size_t q=nameRva;q<image.size() && q-nameRva<260 && image[q];++q)
+            for(size_t q=nameRva;q<image.size()&&q-nameRva<260&&image[q];++q)
                 dll.push_back(static_cast<char>(image[q]));
-            if(dll.empty() || dll.size()>=260) return "INVALID: invalid import DLL name.";
-            if(importNames.size()<32) importNames.push_back(dll);
-            const uint32_t thunkRva=oft?oft:firstThunk;
+            if(dll.empty()||dll.size()>=260) return "INVALID: invalid import DLL name.";
+            ++importDllCount;
+            if(importDetails.size()<64) importDetails.push_back("DLL "+dll);
+            const uint32_t lookup=oft?oft:firstThunk;
             bool thunkTerminated=false;
             for(uint32_t ti=0;ti<4096;++ti) {
-                const uint64_t tr=uint64_t(thunkRva)+uint64_t(ti)*8;
-                if(tr>image.size() || image.size()-static_cast<size_t>(tr)<8)
-                    return "INVALID: import thunk table exceeds image.";
+                const uint64_t src=uint64_t(lookup)+uint64_t(ti)*8;
+                const uint64_t dst=uint64_t(firstThunk)+uint64_t(ti)*8;
+                if(src>image.size()||image.size()-static_cast<size_t>(src)<8||
+                   dst>image.size()||image.size()-static_cast<size_t>(dst)<8)
+                    return "INVALID: import thunk/IAT table exceeds image.";
                 uint64_t value=0;
-                if(!peRead64(image,static_cast<size_t>(tr),value)) return "INVALID: truncated import thunk.";
+                if(!peRead64(image,static_cast<size_t>(src),value))
+                    return "INVALID: truncated import thunk.";
                 if(!value) { thunkTerminated=true; break; }
-                if(!(value & (uint64_t(1)<<63))) {
-                    const uint64_t hintName=value;
-                    if(hintName>=image.size() || image.size()-static_cast<size_t>(hintName)<3)
+                std::string symbol;
+                if(value&(uint64_t(1)<<63)) {
+                    if(value&0x7fffffffffff0000ULL)
+                        return "INVALID: malformed ordinal import encoding.";
+                    symbol="#"+std::to_string(value&0xffff);
+                } else {
+                    if(value>UINT32_MAX||value>=image.size()||image.size()-static_cast<size_t>(value)<3)
                         return "INVALID: import-by-name RVA is outside image.";
-                    bool nameEnd=false;
-                    for(size_t q=static_cast<size_t>(hintName)+2;q<image.size() && q-static_cast<size_t>(hintName)<260;++q) {
-                        if(image[q]==0) { nameEnd=true; break; }
-                    }
-                    if(!nameEnd) return "INVALID: unterminated import symbol name.";
+                    const size_t nameStart=static_cast<size_t>(value)+2;
+                    for(size_t q=nameStart;q<image.size()&&q-nameStart<256&&image[q];++q)
+                        symbol.push_back(static_cast<char>(image[q]));
+                    if(symbol.empty()||symbol.size()>=256)
+                        return "INVALID: malformed import symbol name.";
                 }
+                const uint64_t stub=importStubBase+uint64_t(importSymbols)*16;
+                for(unsigned n=0;n<8;++n) image[static_cast<size_t>(dst)+n]=uint8_t(stub>>(n*8));
+                if(importDetails.size()<64) importDetails.push_back("  "+symbol+" -> diagnostic stub");
                 ++importSymbols;
             }
             if(!thunkTerminated) return "INVALID: import thunk limit exceeded.";
         }
         if(!terminated) return "INVALID: import descriptor table has no terminator.";
     }
+
     std::ostringstream out;
-    out << "PE IMAGE MAPPED INTO TEMPORARY GUEST BUFFER\n"
-        << "Architecture: x86-64 PE32+\n"
-        << "Image base (preferred): 0x" << std::hex << imageBase << "\n"
-        << "Entry RVA: 0x" << entry << std::dec << "\n"
-        << "Mapped image size: " << image.size() << " bytes\n"
-        << "Headers copied: " << headersSize << " bytes\n"
-        << "Sections mapped: " << sections << "\n"
-        << "Relocation blocks validated: " << relocBlocks << " (entries: " << relocEntries << ", DIR64: " << dir64Entries << ")\n"
-        << "Import DLLs: " << importNames.size() << " listed (symbols validated: " << importSymbols << ")\n";
-    for (const auto& dll : importNames) out << "  DLL: " << dll << "\n";
-    out << "Uninitialized section bytes: zero-filled\n"
-        << "Validation: section bounds and raw file ranges checked\n"
-        << "IMPORTANT: temporary validation buffer only; not installed in persistent guest RAM and NOT executed.\n"
-        << "Not implemented: relocations, imports/IAT, TLS, DLLs, Windows APIs, page protections.";
+    out<<"PE32+ IMAGE PREPARED IN TEMPORARY GUEST BUFFER\n"
+       <<"Architecture: x86-64\nPreferred image base: 0x"<<std::hex<<preferredBase
+       <<"\nGuest load base: 0x"<<guestLoadBase<<"\nEntry RVA: 0x"<<entry<<std::dec
+       <<"\nMapped image size: "<<image.size()<<" bytes\nSections mapped: "<<sections
+       <<"\nBase relocations applied: "<<relocEntries<<" (DIR64: "<<dir64Entries
+       <<", blocks: "<<relocBlocks<<")\nImport DLLs: "<<importDllCount
+       <<"\nIAT entries replaced with diagnostic stubs: "<<importSymbols<<"\n";
+    for(const auto& detail:importDetails) out<<"  "<<detail<<"\n";
+    out<<"BSS/uninitialized bytes: zero-filled\n"
+       <<"Buffer is temporary and discarded after inspection; no code was executed.\n"
+       <<"Not implemented: real DLL loading, Windows API dispatch, TLS, page protections, process startup.";
     return out.str();
-}
 }
 
 extern "C" JNIEXPORT jstring JNICALL
