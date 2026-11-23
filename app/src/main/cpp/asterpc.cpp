@@ -1,4 +1,5 @@
 #include <jni.h>
+#include "winapi_dispatcher.h"
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -8,12 +9,14 @@
 #include <algorithm>
 #include <cctype>
 #include <utility>
+#include <unordered_map>
 
 namespace {
 enum Reg : unsigned { RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI,
                       R8, R9, R10, R11, R12, R13, R14, R15 };
 constexpr size_t MEMORY_SIZE = 1024 * 1024;
 constexpr uint64_t DEFAULT_STEP_LIMIT = 1000000;
+constexpr uint64_t API_STUB_BASE = 0x0000700000000000ULL;
 
 struct Cpu {
     std::array<uint64_t,16> r{};
@@ -31,10 +34,34 @@ struct Operand {
 struct Machine {
     Cpu cpu;
     std::vector<uint8_t> mem;
+    asterpc::WinApiDispatcher apiDispatcher;
+    asterpc::Win64CallFrame apiFrame;
+    std::unordered_map<uint64_t,std::pair<std::string,std::string>> apiStubs;
     explicit Machine(const std::vector<uint8_t>& program) : mem(MEMORY_SIZE,0) {
         if(program.size()>mem.size()/2) { cpu.error="program is larger than guest memory"; return; }
         std::copy(program.begin(),program.end(),mem.begin());
         cpu.r[RSP]=MEMORY_SIZE-16;
+    }
+    bool bindApiStub(uint64_t address,const std::string& dll,const std::string& symbol) {
+        if(address<API_STUB_BASE || address-API_STUB_BASE>0x100000ULL ||
+           apiStubs.find(address)!=apiStubs.end()) return false;
+        apiStubs.emplace(address,std::make_pair(dll,symbol));
+        return true;
+    }
+    bool invokeApiStub(uint64_t address) {
+        const auto found=apiStubs.find(address);
+        if(found==apiStubs.end()) return fail("unresolved external API thunk");
+        apiFrame.rcx=cpu.r[RCX];
+        apiFrame.rdx=cpu.r[RDX];
+        apiFrame.r8=cpu.r[R8];
+        apiFrame.r9=cpu.r[R9];
+        const auto result=apiDispatcher.dispatch(found->second.first,found->second.second,apiFrame);
+        if(result.status==asterpc::DispatchStatus::NotFound)
+            return fail("Windows API dispatcher rejected imported symbol");
+        cpu.r[RAX]=result.value;
+        if(result.status==asterpc::DispatchStatus::ExitRequested || apiFrame.exitRequested)
+            cpu.halted=true;
+        return true;
     }
     bool fail(const char* why) { cpu.error=why; return false; }
     bool range(uint64_t a,size_t n) const { return a<=mem.size() && n<=mem.size()-static_cast<size_t>(a); }
@@ -173,6 +200,20 @@ struct Machine {
                 if(op==0xF7 && group==0) {
                     uint64_t imm; if(!fetchN(imm,4)) return false;
                     uint64_t x=readOp(rm,8); if(!cpu.error.empty()) return false; setLogic(x & static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(imm)))); continue;
+                }
+                if(op==0xFF && group==2) {
+                    const uint64_t target=readOp(rm,8);
+                    if(!cpu.error.empty()) return false;
+                    if(apiStubs.find(target)!=apiStubs.end()) {
+                        if(!invokeApiStub(target)) return false;
+                        continue;
+                    }
+                    if(target>=mem.size())
+                        return fail("indirect CALL target is neither guest code nor a registered API thunk");
+                    const uint64_t returnAddress=cpu.rip;
+                    if(!push(returnAddress)) return false;
+                    cpu.rip=target;
+                    continue;
                 }
                 if(op==0xFF && (group==0||group==1)) {
                     uint64_t x=readOp(rm,8), old=x; if(!cpu.error.empty()) return false;
@@ -378,6 +419,40 @@ std::string selfTests() {
     std::string a=test(basic,50),b=test(memtest,42),c=test(arithmetic,11),d=test(shifts,12);
     const std::string vm=guestMemorySelfTest();
 
+    // End-to-end interpreter -> indirect CALL -> Win64 API thunk -> RAX.
+    std::vector<uint8_t> apiProgram={0x48,0xB8};
+    auto append64=[&](uint64_t value) {
+        for(unsigned n=0;n<8;++n) apiProgram.push_back(uint8_t(value>>(n*8)));
+    };
+    append64(API_STUB_BASE+0x10);
+    apiProgram.insert(apiProgram.end(),{0xFF,0xD0,0xF4});
+    Machine apiMachine(apiProgram);
+    const bool apiBound=apiMachine.bindApiStub(API_STUB_BASE+0x10,"kernel32.dll","GetTickCount64");
+    apiMachine.apiFrame.virtualMilliseconds=0x100000005ULL;
+    const bool apiCallPass=apiBound && apiMachine.run() &&
+                           apiMachine.cpu.r[RAX]==0x100000005ULL;
+
+    std::vector<uint8_t> lastErrorProgram={0x48,0xB9};
+    for(unsigned n=0;n<8;++n) lastErrorProgram.push_back(uint8_t(uint64_t(1234)>>(n*8)));
+    lastErrorProgram.insert(lastErrorProgram.end(),{0x48,0xB8});
+    for(unsigned n=0;n<8;++n) lastErrorProgram.push_back(uint8_t((API_STUB_BASE+0x20)>>(n*8)));
+    lastErrorProgram.insert(lastErrorProgram.end(),{0xFF,0xD0,0x48,0xB8});
+    for(unsigned n=0;n<8;++n) lastErrorProgram.push_back(uint8_t((API_STUB_BASE+0x30)>>(n*8)));
+    lastErrorProgram.insert(lastErrorProgram.end(),{0xFF,0xD0,0xF4});
+    Machine lastErrorMachine(lastErrorProgram);
+    const bool lastErrorBound=lastErrorMachine.bindApiStub(API_STUB_BASE+0x20,"kernel32.dll","SetLastError") &&
+                              lastErrorMachine.bindApiStub(API_STUB_BASE+0x30,"kernel32.dll","GetLastError");
+    const bool lastErrorCallPass=lastErrorBound && lastErrorMachine.run() &&
+                                 lastErrorMachine.cpu.r[RAX]==1234;
+
+    std::vector<uint8_t> exitProgram={0x48,0xB9,42,0,0,0,0,0,0,0,0x48,0xB8};
+    for(unsigned n=0;n<8;++n) exitProgram.push_back(uint8_t((API_STUB_BASE+0x40)>>(n*8)));
+    exitProgram.insert(exitProgram.end(),{0xFF,0xD0});
+    Machine exitMachine(exitProgram);
+    const bool exitBound=exitMachine.bindApiStub(API_STUB_BASE+0x40,"kernel32.dll","ExitProcess");
+    const bool exitCallPass=exitBound && exitMachine.run() && exitMachine.cpu.halted &&
+                            exitMachine.apiFrame.exitRequested && exitMachine.apiFrame.exitCode==42;
+
     // Build a tiny synthetic PE32+ image to exercise the actual section mapper.
     std::vector<uint8_t> peFixture(0x400,0);
     auto put16=[&](size_t o,uint16_t v) {
@@ -412,16 +487,20 @@ std::string selfTests() {
     const bool overlapRejected=overlapResult.find("overlapping PE sections")!=std::string::npos;
 
     bool pass=a.rfind("PASS",0)==0&&b.rfind("PASS",0)==0&&c.rfind("PASS",0)==0&&
-              d.rfind("PASS",0)==0&&vm.rfind("PASS",0)==0&&peMapPass&&overlapRejected;
+              d.rfind("PASS",0)==0&&vm.rfind("PASS",0)==0&&peMapPass&&overlapRejected&&
+              apiCallPass&&lastErrorCallPass&&exitCallPass;
     return std::string("ASTERPC CPU + GUEST MEMORY + PE MAPPER: ")+(pass?"ALL TESTS PASS":"TEST FAILURE")+
       "\n1 MOV/ADD: "+a+"\n2 memory store/load: "+b+"\n3 register arithmetic: "+c+"\n4 shift: "+d+
       "\n5 guest virtual memory: "+vm+
       "\n6 PE section mapping: "+(peMapPass?"PASS: synthetic PE32+ image mapped with RX section permissions":"FAIL: "+peMap)+
       "\n7 PE overlap guard: "+(overlapRejected?"PASS: overlapping section rejected":"FAIL: "+overlapResult)+
+      "\n8 CPU indirect CALL -> GetTickCount64 thunk: "+(apiCallPass?"PASS":"FAIL")+
+      "\n9 CPU CALL -> SetLastError/GetLastError: "+(lastErrorCallPass?"PASS":"FAIL")+
+      "\n10 CPU CALL -> ExitProcess guest stop: "+(exitCallPass?"PASS":"FAIL")+
       "\nGuest RAM: 1 MiB, bounds-checked, little-endian; stack resides in guest RAM."+
       "\nVirtual memory prototype: isolated regions, overlap rejection, read/write/execute permissions, 256 MiB commit cap."+
       "\nInstructions: MOV, LEA, ADD, SUB, OR, AND, XOR, CMP, TEST, INC, DEC, NOT, NEG, SHL, SHR, SAR, PUSH, POP, CALL, RET, JMP, JZ, JNZ, NOP, HLT."+
-      "\nScope: experimental 64-bit subset; no hardware paging/MMU, SIMD, interrupts, privilege rings, or executable Windows API dispatcher.";
+      "\nScope: experimental 64-bit subset; API calls use registered test thunks only. No complete PE-to-runtime loader, hardware paging/MMU, SIMD, interrupts, or broad Win32 compatibility.";
 }
 }
 
