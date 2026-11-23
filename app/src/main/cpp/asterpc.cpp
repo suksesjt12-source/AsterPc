@@ -220,18 +220,97 @@ static std::string test(const std::vector<uint8_t>& p,uint64_t expected) {
     if(!ok) s<<" error="<<m.cpu.error; else if(m.cpu.r[RAX]!=expected) s<<" expected="<<expected;
     return s.str();
 }
-static std::string selfTests() {
+static // Minimal guest virtual-address-space model. Regions are isolated and permission checked.
+// This is metadata-backed RAM for the prototype, not Windows paging or an MMU.
+class GuestAddressSpace {
+    struct Region {
+        uint64_t base;
+        std::vector<uint8_t> bytes;
+        bool readable, writable, executable;
+    };
+    std::vector<Region> regions;
+    size_t committed=0;
+    static constexpr size_t MAX_COMMITTED=256u*1024u*1024u;
+    const Region* locate(uint64_t address,size_t count) const {
+        for(const auto& r:regions) {
+            if(address<r.base) continue;
+            const uint64_t offset=address-r.base;
+            if(offset<=r.bytes.size() && count<=r.bytes.size()-static_cast<size_t>(offset))
+                return &r;
+        }
+        return nullptr;
+    }
+    Region* locate(uint64_t address,size_t count) {
+        for(auto& r:regions) {
+            if(address<r.base) continue;
+            const uint64_t offset=address-r.base;
+            if(offset<=r.bytes.size() && count<=r.bytes.size()-static_cast<size_t>(offset))
+                return &r;
+        }
+        return nullptr;
+    }
+public:
+    bool map(uint64_t base,size_t size,bool read,bool write,bool execute) {
+        if(!size || size>MAX_COMMITTED-committed || base>UINT64_MAX-size) return false;
+        const uint64_t end=base+size;
+        for(const auto& r:regions) {
+            const uint64_t otherEnd=r.base+r.bytes.size();
+            if(base<otherEnd && r.base<end) return false;
+        }
+        Region region{base,std::vector<uint8_t>(size,0),read,write,execute};
+        regions.push_back(std::move(region));
+        committed+=size;
+        return true;
+    }
+    bool read8(uint64_t address,uint8_t& value) const {
+        const Region* r=locate(address,1);
+        if(!r||!r->readable) return false;
+        value=r->bytes[static_cast<size_t>(address-r->base)];
+        return true;
+    }
+    bool write8(uint64_t address,uint8_t value) {
+        Region* r=locate(address,1);
+        if(!r||!r->writable) return false;
+        r->bytes[static_cast<size_t>(address-r->base)]=value;
+        return true;
+    }
+    bool canFetch(uint64_t address) const {
+        const Region* r=locate(address,1);
+        return r&&r->readable&&r->executable;
+    }
+    size_t committedBytes() const { return committed; }
+    size_t regionCount() const { return regions.size(); }
+};
+
+static std::string guestMemorySelfTest() {
+    GuestAddressSpace space;
+    uint8_t value=0;
+    if(!space.map(0x10000000,4096,true,true,false)) return "FAIL: map writable data region";
+    if(!space.write8(0x10000010,0x5a)||!space.read8(0x10000010,value)||value!=0x5a)
+        return "FAIL: guest read/write";
+    if(space.map(0x10000800,4096,true,true,false)) return "FAIL: overlapping region accepted";
+    if(space.write8(0x20000000,1)) return "FAIL: unmapped write accepted";
+    if(space.canFetch(0x10000010)) return "FAIL: data region executable";
+    if(!space.map(0x20000000,4096,true,false,true)) return "FAIL: map read-only code region";
+    if(space.write8(0x20000000,1)) return "FAIL: write to read-only code accepted";
+    if(!space.canFetch(0x20000000)) return "FAIL: executable region rejected";
+    return "PASS: mapping, overlap guard, access permissions, execute permission, and bounds";
+}
+
+std::string selfTests() {
     const std::vector<uint8_t> basic={0x48,0xB8,42,0,0,0,0,0,0,0,0x48,0x83,0xC0,8,0xF4};
     const std::vector<uint8_t> memtest={0x48,0xB8,0x00,0x01,0x00,0x00,0,0,0,0,0x48,0xC7,0x00,0x2A,0,0,0,0x48,0x8B,0x08,0x48,0x89,0xC8,0xF4};
     const std::vector<uint8_t> arithmetic={0x48,0xB8,9,0,0,0,0,0,0,0,0x48,0xB9,3,0,0,0,0,0,0,0,0x48,0x01,0xC8,0x48,0x83,0xE8,1,0xF4};
     const std::vector<uint8_t> shifts={0x48,0xB8,3,0,0,0,0,0,0,0,0x48,0xC1,0xE0,2,0xF4};
     std::string a=test(basic,50),b=test(memtest,42),c=test(arithmetic,11),d=test(shifts,12);
-    bool pass=a.rfind("PASS",0)==0&&b.rfind("PASS",0)==0&&c.rfind("PASS",0)==0&&d.rfind("PASS",0)==0;
+    const std::string vm=guestMemorySelfTest();
+    bool pass=a.rfind("PASS",0)==0&&b.rfind("PASS",0)==0&&c.rfind("PASS",0)==0&&
+              d.rfind("PASS",0)==0&&vm.rfind("PASS",0)==0;
     return std::string("ASTERPC CPU + GUEST MEMORY: ")+(pass?"ALL TESTS PASS":"TEST FAILURE")+
       "\n1 MOV/ADD: "+a+"\n2 memory store/load: "+b+"\n3 register arithmetic: "+c+"\n4 shift: "+d+
       "\nGuest RAM: 1 MiB, bounds-checked, little-endian; stack resides in guest RAM."+
       "\nInstructions: MOV, LEA, ADD, SUB, OR, AND, XOR, CMP, TEST, INC, DEC, NOT, NEG, SHL, SHR, SAR, PUSH, POP, CALL, RET, JMP, JZ, JNZ, NOP, HLT."+
-      "\nScope: experimental 64-bit subset; no paging/virtual memory, SIMD, interrupts, privilege rings, or Windows API.";
+      "\nScope: experimental 64-bit subset; no hardware paging/MMU, SIMD, interrupts, privilege rings, or executable Windows API dispatcher.";
 }
 }
 
