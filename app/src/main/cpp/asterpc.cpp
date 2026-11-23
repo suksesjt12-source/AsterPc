@@ -667,6 +667,11 @@ public:
                 return false;
             }
         }
+        // The process record was reserved earlier; now all module records exist.
+        if(!machine.writeMem(processRecord+48,8,context.modules.size())) {
+            context.error="could not finalize synthetic process module count";
+            return false;
+        }
 
         machine.cpu.r[RSP]=initialStack;
         context.imageBase=base;
@@ -862,6 +867,8 @@ std::string selfTests() {
                 magic==0x50534141u &&
                 peRuntimeMachine.readMem(processBootstrap.context.processMetadataAddress+8,8,pid) &&
                 pid==1 &&
+                peRuntimeMachine.readMem(processBootstrap.context.processMetadataAddress+48,8,stackTop) &&
+                stackTop==processBootstrap.context.moduleCount &&
                 peRuntimeMachine.readMem(processBootstrap.context.processMetadataAddress+56,8,threadPtr) &&
                 threadPtr==processBootstrap.context.threadMetadataAddress &&
                 peRuntimeMachine.readMem(threadPtr,4,magic) && magic==0x54534141u &&
