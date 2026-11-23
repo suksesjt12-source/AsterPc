@@ -25,10 +25,17 @@ DispatchResult returned(uint64_t value=0) {
 
 } // namespace
 
+bool WinApiDispatcher::supports(const std::string& dll,const std::string& symbol) const {
+    if (!supportedModule(dll)) return false;
+    return symbol=="GetTickCount" || symbol=="GetTickCount64" ||
+           symbol=="GetLastError" || symbol=="SetLastError" ||
+           symbol=="GetCurrentProcess" || symbol=="ExitProcess";
+}
+
 DispatchResult WinApiDispatcher::dispatch(const std::string& dll,
                                           const std::string& symbol,
                                           Win64CallFrame& frame) const {
-    if (!supportedModule(dll)) return {};
+    if (!supports(dll,symbol)) return {};
 
     // Names are intentionally case-sensitive, matching PE export lookup.
     if (symbol=="GetTickCount") {
