@@ -31,13 +31,13 @@ Tidak semua encoding, prefix, ukuran operand, atau addressing mode x86-64 tersed
 - Registry metadata untuk nama DLL import dan jumlah simbolnya.
 - Daftar nama API umum untuk pengenalan saja.
 
-**Batasan loader:** alamat IAT dan handle DLL masih placeholder diagnostik. DLL tidak dimuat atau dieksekusi. Windows API belum mempunyai dispatcher yang dapat dipanggil guest CPU. TLS, startup process, page-protection enforcement saat eksekusi, dan loader lengkap belum ada. PE image dipetakan hanya untuk pemeriksaan dan kemudian dibuang.
+**Batasan loader:** alamat IAT dan handle DLL masih placeholder diagnostik dan belum otomatis terdaftar ke CPU thunk registry. DLL tidak dimuat atau dieksekusi. TLS, startup process, page-protection enforcement saat eksekusi, dan loader lengkap belum ada. PE image dipetakan hanya untuk pemeriksaan dan kemudian dibuang.
 
 ## Limited Win32 API dispatcher
-- Separate deterministic dispatcher prototype using the Microsoft x64 integer argument registers (RCX, RDX, R8, R9).
-- Implemented test semantics for `GetTickCount`, `GetTickCount64`, `GetLastError`, `SetLastError`, `GetCurrentProcess`, and `ExitProcess` from `kernel32.dll`/`kernelbase.dll`.
-- Supports a virtual tick source and isolated guest last-error / exit-state fields; it does not call host Windows APIs or affect Android.
-- Includes a separate native self-test exposed by the Android UI.
+- Dispatcher deterministik menggunakan register argumen integer Microsoft x64 (RCX, RDX, R8, R9).
+- Semantik uji tersedia untuk `GetTickCount`, `GetTickCount64`, `GetLastError`, `SetLastError`, `GetCurrentProcess`, dan `ExitProcess` dari `kernel32.dll`/`kernelbase.dll`.
+- Menggunakan waktu virtual dan status last-error/exit guest; tidak memanggil Windows API host atau memengaruhi Android.
+- Menyediakan self-test native terpisah melalui UI Android.
 
 **Integration status:** the x86-64 interpreter can now execute indirect `CALL r/m64` instructions targeting explicitly registered API thunk addresses. The bridge transfers `RCX`, `RDX`, `R8`, and `R9`, returns API results through `RAX`, and turns `ExitProcess` into a guest stop request. Self-tests cover `GetTickCount64`, `SetLastError`/`GetLastError`, and `ExitProcess`. The PE parser still writes diagnostic placeholder addresses rather than automatically registering each imported API; this is not yet a complete PE runtime or Windows process.
 
