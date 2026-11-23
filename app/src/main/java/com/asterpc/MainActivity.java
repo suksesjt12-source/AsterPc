@@ -1,9 +1,9 @@
 package com.asterpc;
 
 import android.app.Activity;
+import android.content.Intent;
 import android.os.Bundle;
 import android.graphics.Typeface;
-import android.view.Gravity;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -36,11 +36,16 @@ public class MainActivity extends Activity {
         root.addView(subtitle);
 
         TextView status = new TextView(this);
-        status.setText("\nStatus: prototype 0.1.0\nHost ABI: " + android.os.Build.SUPPORTED_ABIS[0]
-                + "\nTarget: experimental x86-64 instruction subset");
+        status.setText("\nStatus: prototype 0.2.0\nHost ABI: " + android.os.Build.SUPPORTED_ABIS[0]
+                + "\nCPU: experimental x86-64 interpreter\nGPU: OpenGL ES 2.0 renderer");
         status.setTextColor(0xFFE4ECF5);
         status.setTextSize(15);
         root.addView(status);
+
+        Button gpu = new Button(this);
+        gpu.setText("Open GPU rendering test");
+        root.addView(gpu);
+        gpu.setOnClickListener(v -> startActivity(new Intent(this, GpuActivity.class)));
 
         Button test = new Button(this);
         test.setText("Run CPU interpreter self-test");
@@ -54,7 +59,7 @@ public class MainActivity extends Activity {
         root.addView(output);
 
         TextView warning = new TextView(this);
-        warning.setText("\nImportant: this build is not a Windows emulator yet. It only tests a tiny instruction interpreter. Windows APIs, graphics, audio, storage mapping and game compatibility are not implemented.");
+        warning.setText("\nImportant: GPU test currently renders a native demo scene. It is not yet connected to guest Windows graphics, DirectX, Vulkan, or PC games.");
         warning.setTextColor(0xFFFFD28A);
         warning.setTextSize(13);
         root.addView(warning);
