@@ -103,6 +103,14 @@ std::string runWinApiDispatcherSelfTests() {
     check("ExitProcess records the guest exit code and requests guest termination",
           result.status==DispatchStatus::ExitRequested && frame.exitRequested && frame.exitCode==42);
 
+    check("capability lookup recognizes supported DLL/export pairs",
+          dispatcher.supports("KERNEL32.DLL","GetTickCount64") &&
+          dispatcher.supports("kernelbase.dll","SetLastError"));
+    check("capability lookup rejects unsupported DLLs and exports",
+          !dispatcher.supports("user32.dll","GetTickCount") &&
+          !dispatcher.supports("kernel32.dll","GetModuleHandleA") &&
+          !dispatcher.supports("kernel32.dll","gettickcount"));
+
     const bool before=frame.exitRequested;
     result=dispatcher.dispatch("user32.dll","GetTickCount",frame);
     check("unsupported DLL is rejected without side effects",
@@ -113,7 +121,7 @@ std::string runWinApiDispatcherSelfTests() {
           result.status==DispatchStatus::NotFound);
 
     report << "Win32 subset dispatcher: " << passed << "/" << total << " tests passed.\n"
-           << "Scope: deterministic call-frame dispatcher. The experimental CPU can invoke explicitly registered test thunks; PE import entries are not yet automatically bound, and broad Win32 compatibility is not implemented.";
+           << "Scope: deterministic call-frame dispatcher. The experimental CPU can invoke explicitly registered test thunks; PE import entries are not yet automatically bound. Capability lookup tests cover DLL case normalization and exact export names; broad Win32 compatibility is not implemented.";
     return report.str();
 }
 
