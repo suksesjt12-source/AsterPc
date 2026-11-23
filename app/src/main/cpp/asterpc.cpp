@@ -373,6 +373,10 @@ struct GuestModuleRecord {
     std::string name;
     std::string normalized;
     uint64_t diagnosticHandle=0;
+    bool mappedImage=false;
+    uint64_t imageBase=0;
+    uint64_t imageSize=0;
+    uint64_t entryPoint=0;
     uint32_t imports=0;
     uint32_t recognized=0;
 };
@@ -391,7 +395,25 @@ public:
         for(const auto& module:modules) if(module.normalized==key) return true;
         if(name.empty()||name.size()>260||modules.size()>=128) return false;
         const uint64_t handle=0x0000600000000000ULL+uint64_t(modules.size())*0x10000ULL;
-        modules.push_back({name,key,handle,0,0});
+        modules.push_back({name,key,handle,false,0,0,0,0,0});
+        return true;
+    }
+    bool registerImageModule(const std::string& name,uint64_t base,
+                             uint64_t imageSize,uint64_t entryPoint) {
+        const std::string key=normalize(name);
+        if(name.empty()||name.size()>260||!imageSize||base>UINT64_MAX-imageSize)
+            return false;
+        for(auto& module:modules) if(module.normalized==key) {
+            if(module.mappedImage) return false;
+            module.mappedImage=true;
+            module.imageBase=base;
+            module.imageSize=imageSize;
+            module.entryPoint=entryPoint;
+            return true;
+        }
+        if(modules.size()>=128) return false;
+        const uint64_t handle=0x0000600000000000ULL+uint64_t(modules.size())*0x10000ULL;
+        modules.push_back({name,key,handle,true,base,imageSize,entryPoint,0,0});
         return true;
     }
     bool noteImport(const std::string& name,bool known) {
@@ -404,14 +426,40 @@ public:
         return false;
     }
     size_t size() const { return modules.size(); }
+    size_t mappedImageCount() const {
+        size_t total=0; for(const auto& module:modules) if(module.mappedImage) ++total;
+        return total;
+    }
+    size_t importOnlyModuleCount() const {
+        size_t total=0; for(const auto& module:modules) if(!module.mappedImage) ++total;
+        return total;
+    }
+    bool hasMappedImage(const std::string& name,uint64_t base,uint64_t entry) const {
+        const std::string key=normalize(name);
+        for(const auto& module:modules)
+            if(module.normalized==key && module.mappedImage &&
+               module.imageBase==base && module.entryPoint==entry) return true;
+        return false;
+    }
+    bool hasImportOnlyModule(const std::string& name) const {
+        const std::string key=normalize(name);
+        for(const auto& module:modules)
+            if(module.normalized==key && !module.mappedImage) return true;
+        return false;
+    }
     uint32_t importCount() const {
         uint32_t total=0; for(const auto& module:modules) total+=module.imports; return total;
     }
     std::string describe() const {
         std::ostringstream out;
-        for(const auto& module:modules)
-            out<<"  "<<module.name<<" handle=0x"<<std::hex<<module.diagnosticHandle<<std::dec
-               <<" imports="<<module.imports<<" recognized="<<module.recognized<<" (metadata only)\n";
+        for(const auto& module:modules) {
+            out<<"  "<<module.name<<" handle=0x"<<std::hex<<module.diagnosticHandle<<std::dec;
+            if(module.mappedImage)
+                out<<" mapped_image base=0x"<<std::hex<<module.imageBase
+                   <<" size=0x"<<module.imageSize<<" entry=0x"<<module.entryPoint<<std::dec;
+            else out<<" import_metadata_only (not loaded)";
+            out<<" imports="<<module.imports<<" recognized="<<module.recognized<<"\n";
+        }
         return out.str();
     }
 };
@@ -451,6 +499,161 @@ struct PeRuntimeImage {
     uint64_t loadBase=0;
     uint32_t entryRva=0;
     std::vector<PeImportBinding> imports;
+};
+
+struct GuestProcessContext {
+    bool initialized=false;
+    uint64_t imageBase=0;
+    uint64_t entryPoint=0;
+    uint64_t stackBase=0;
+    uint64_t stackTop=0;
+    uint64_t initialStackPointer=0;
+    uint64_t commandLineAddress=0;
+    uint64_t environmentAddress=0;
+    uint32_t importedSymbolCount=0;
+    size_t moduleCount=0;
+    GuestModuleRegistry modules;
+    std::string error;
+};
+
+class GuestProcessBootstrap {
+    static bool writeWideBuffer(Machine& machine,uint64_t& cursor,
+                                const std::vector<uint16_t>& text,uint64_t& address) {
+        if(text.empty() || text.size()>32768) return false;
+        const uint64_t bytes=uint64_t(text.size())*2;
+        if(cursor<bytes) return false;
+        const uint64_t start=cursor-bytes;
+        if(!machine.range(start,static_cast<size_t>(bytes))) return false;
+        for(size_t i=0;i<text.size();++i)
+            if(!machine.writeMem(start+uint64_t(i)*2,2,text[i])) return false;
+        cursor=start;
+        address=start;
+        return true;
+    }
+    static bool asciiToWide(const std::string& input,std::vector<uint16_t>& output) {
+        if(input.size()>32760) return false;
+        output.clear();
+        output.reserve(input.size()+1);
+        for(unsigned char ch:input) {
+            if(ch>0x7f) return false;
+            output.push_back(static_cast<uint16_t>(ch));
+        }
+        output.push_back(0);
+        return true;
+    }
+public:
+    bool initialize(Machine& machine,const PeRuntimeImage& image,
+                    const std::string& imageName,const std::string& commandLine,
+                    const std::vector<std::string>& environment) {
+        context=GuestProcessContext{};
+        if(image.bytes.empty() || image.loadBase!=machine.memoryBase ||
+           image.bytes.size()>machine.mem.size()) {
+            context.error="mapped image does not match the CPU guest address space";
+            return false;
+        }
+        const uint64_t base=image.loadBase;
+        if(base>UINT64_MAX-image.bytes.size()) {
+            context.error="mapped image address range overflows";
+            return false;
+        }
+        const uint64_t entry=base+image.entryRva;
+        if(!machine.range(entry,1)) {
+            context.error="image entry point is outside CPU guest memory";
+            return false;
+        }
+        const uint64_t imageEnd=base+image.bytes.size();
+        if(imageEnd>UINT64_MAX-0xFFFULL) {
+            context.error="image stack alignment overflows guest address space";
+            return false;
+        }
+        const uint64_t stackBase=(imageEnd+0xFFFULL)&~0xFFFULL;
+        const uint64_t stackTop=base+machine.mem.size();
+        if(stackBase>stackTop || stackTop-stackBase<16u*1024u) {
+            context.error="insufficient reserved guest memory for process stack";
+            return false;
+        }
+
+        std::vector<uint16_t> command;
+        if(!asciiToWide(commandLine,command)) {
+            context.error="command line must be bounded ASCII for this bootstrap prototype";
+            return false;
+        }
+        std::vector<uint16_t> envBlock;
+        for(const auto& item:environment) {
+            if(item.empty() || item.size()>32760) {
+                context.error="environment entry is empty or too large";
+                return false;
+            }
+            for(unsigned char ch:item) {
+                if(ch>0x7f) {
+                    context.error="environment must be bounded ASCII for this bootstrap prototype";
+                    return false;
+                }
+                envBlock.push_back(static_cast<uint16_t>(ch));
+            }
+            envBlock.push_back(0);
+        }
+        envBlock.push_back(0);
+        if(environment.empty()) envBlock.push_back(0);
+
+        uint64_t cursor=stackTop;
+        if(!writeWideBuffer(machine,cursor,envBlock,context.environmentAddress) ||
+           !writeWideBuffer(machine,cursor,command,context.commandLineAddress)) {
+            context.error="could not place process parameters in guest stack memory";
+            return false;
+        }
+        if(cursor<32) {
+            context.error="guest process stack metadata underflow";
+            return false;
+        }
+        const uint64_t initialStack=(cursor-32)&~0xFULL;
+        if(initialStack<stackBase || !machine.range(initialStack,32)) {
+            context.error="guest process stack layout exceeds reserved stack range";
+            return false;
+        }
+
+        if(!context.modules.registerImageModule(imageName,base,image.bytes.size(),entry)) {
+            context.error="failed to register executable image module";
+            return false;
+        }
+        for(const auto& binding:image.imports) {
+            if(!context.modules.registerImportModule(binding.dll) ||
+               !context.modules.noteImport(binding.dll,binding.supported)) {
+                context.error="failed to register imported DLL metadata";
+                return false;
+            }
+        }
+
+        machine.cpu.r[RSP]=initialStack;
+        context.imageBase=base;
+        context.entryPoint=entry;
+        context.stackBase=stackBase;
+        context.stackTop=stackTop;
+        context.initialStackPointer=initialStack;
+        context.importedSymbolCount=context.modules.importCount();
+        context.moduleCount=context.modules.size();
+        context.initialized=true;
+        return true;
+    }
+
+    static bool wideAsciiEquals(const Machine& machine,uint64_t address,
+                                const std::string& expected,bool doubleNull=false) {
+        for(size_t i=0;i<expected.size();++i) {
+            uint64_t value=0;
+            if(!machine.readMem(address+uint64_t(i)*2,2,value) ||
+               value!=static_cast<unsigned char>(expected[i])) return false;
+        }
+        uint64_t terminator=1;
+        if(!machine.readMem(address+uint64_t(expected.size())*2,2,terminator) ||
+           terminator!=0) return false;
+        if(doubleNull) {
+            if(!machine.readMem(address+uint64_t(expected.size()+1)*2,2,terminator) ||
+               terminator!=0) return false;
+        }
+        return true;
+    }
+
+    GuestProcessContext context;
 };
 
 static std::string mapPeImage(const std::vector<uint8_t>& b,PeRuntimeImage* runtime=nullptr);
@@ -586,9 +789,33 @@ std::string selfTests() {
             peBindingsReady=peRuntimeMachine.bindApiStub(binding.stubAddress,
                                                          binding.dll,binding.symbol) && peBindingsReady;
     }
+    GuestProcessBootstrap processBootstrap;
+    const bool processBootstrapPass=peBindingsReady &&
+        processBootstrap.initialize(peRuntimeMachine,runtimeImage,"asterpc-test.exe",
+                                     "asterpc-test.exe --runtime-smoke",
+                                     {"ASTERPC_MODE=TEST","PATH=ASTERPC/SYSTEM32"});
+    const bool processContextPass=processBootstrapPass &&
+        processBootstrap.context.initialized &&
+        processBootstrap.context.entryPoint==runtimeImage.loadBase+runtimeImage.entryRva &&
+        (processBootstrap.context.initialStackPointer&0xFULL)==0 &&
+        processBootstrap.context.modules.mappedImageCount()==1 &&
+        processBootstrap.context.modules.importOnlyModuleCount()==1 &&
+        processBootstrap.context.modules.hasMappedImage("ASTERPC-TEST.EXE",
+            runtimeImage.loadBase,runtimeImage.loadBase+runtimeImage.entryRva) &&
+        processBootstrap.context.modules.hasImportOnlyModule("kernel32.dll") &&
+        processBootstrap.context.importedSymbolCount==2 &&
+        GuestProcessBootstrap::wideAsciiEquals(peRuntimeMachine,
+            processBootstrap.context.commandLineAddress,"asterpc-test.exe --runtime-smoke") &&
+        GuestProcessBootstrap::wideAsciiEquals(peRuntimeMachine,
+            processBootstrap.context.environmentAddress,"ASTERPC_MODE=TEST") &&
+        GuestProcessBootstrap::wideAsciiEquals(peRuntimeMachine,
+            processBootstrap.context.environmentAddress+
+                uint64_t(std::string("ASTERPC_MODE=TEST").size()+1)*2,
+            "PATH=ASTERPC/SYSTEM32",true);
+
     constexpr uint64_t PE_TEST_TICKS=0x123456789ABCULL;
     peRuntimeMachine.apiFrame.virtualMilliseconds=PE_TEST_TICKS;
-    const bool peRuntimeCallPass=peBindingsReady && peRuntimeMachine.run() &&
+    const bool peRuntimeCallPass=processContextPass && peRuntimeMachine.run() &&
                                  peRuntimeMachine.cpu.r[RAX]==PE_TEST_TICKS;
 
     std::vector<uint8_t> unsupportedPeBytes=runtimeImage.bytes;
@@ -604,7 +831,7 @@ std::string selfTests() {
     bool pass=a.rfind("PASS",0)==0&&b.rfind("PASS",0)==0&&c.rfind("PASS",0)==0&&
               d.rfind("PASS",0)==0&&vm.rfind("PASS",0)==0&&peMapPass&&overlapRejected&&
               apiCallPass&&iatCallPass&&lastErrorCallPass&&exitCallPass&&importResolverPass&&
-              peRuntimeCallPass&&unsupportedImportRejected;
+              processBootstrapPass&&processContextPass&&peRuntimeCallPass&&unsupportedImportRejected;
     return std::string("ASTERPC CPU + WIN32 THUNKS + GUEST MEMORY + PE MAPPER: ")+(pass?"ALL TESTS PASS":"TEST FAILURE")+
       "\n1 MOV/ADD: "+a+"\n2 memory store/load: "+b+"\n3 register arithmetic: "+c+"\n4 shift: "+d+
       "\n5 guest virtual memory: "+vm+
@@ -616,7 +843,9 @@ std::string selfTests() {
       "\n11 CPU CALL -> ExitProcess guest stop: "+(exitCallPass?"PASS":"FAIL")+
       "\n12 PE import resolution: "+(importResolverPass?"PASS: supported API thunk separated from unresolved import":"FAIL: "+importMap)+
       "\n13 mapped PE IAT -> CPU CALL -> GetTickCount64: "+(peRuntimeCallPass?"PASS":"FAIL")+
-      "\n14 unsupported PE IAT import remains non-callable: "+(unsupportedImportRejected?"PASS":"FAIL")+
+      "\n14 process bootstrap + UTF-16 process parameters: "+(processBootstrapPass?"PASS: "+std::to_string(processBootstrap.context.moduleCount)+" module records":"FAIL: "+processBootstrap.context.error)+
+      "\n15 process image/stack/module registry validation: "+(processContextPass?"PASS":"FAIL")+
+      "\n16 unsupported PE IAT import remains non-callable: "+(unsupportedImportRejected?"PASS":"FAIL")+
       "\nGuest RAM: 1 MiB minimum, bounds-checked, little-endian; stack resides in guest RAM."+
       "\nPE runtime test: mapped PE image bytes and IAT are consumed directly by the experimental CPU; supported imports bind to deterministic API thunks."+
       "\nVirtual memory prototype: isolated regions, overlap rejection, read/write/execute permissions, 256 MiB commit cap."+
