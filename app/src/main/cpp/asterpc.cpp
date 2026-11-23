@@ -341,7 +341,7 @@ public:
         std::ostringstream out;
         for(const auto& module:modules)
             out<<"  "<<module.name<<" handle=0x"<<std::hex<<module.diagnosticHandle<<std::dec
-               <<" imports="<<module.imports<<" recognized="<<module.recognized<<" (metadata only)\\n";
+               <<" imports="<<module.imports<<" recognized="<<module.recognized<<" (metadata only)\n";
         return out.str();
     }
 };
@@ -368,6 +368,8 @@ static std::string guestMemorySelfTest() {
     return "PASS: region mapping, overlap guard, permissions, bounds, and DLL registry";
 }
 
+static std::string mapPeImage(const std::vector<uint8_t>& b);
+
 std::string selfTests() {
     const std::vector<uint8_t> basic={0x48,0xB8,42,0,0,0,0,0,0,0,0x48,0x83,0xC0,8,0xF4};
     const std::vector<uint8_t> memtest={0x48,0xB8,0x00,0x01,0x00,0x00,0,0,0,0,0x48,0xC7,0x00,0x2A,0,0,0,0x48,0x8B,0x08,0x48,0x89,0xC8,0xF4};
@@ -375,11 +377,47 @@ std::string selfTests() {
     const std::vector<uint8_t> shifts={0x48,0xB8,3,0,0,0,0,0,0,0,0x48,0xC1,0xE0,2,0xF4};
     std::string a=test(basic,50),b=test(memtest,42),c=test(arithmetic,11),d=test(shifts,12);
     const std::string vm=guestMemorySelfTest();
+
+    // Build a tiny synthetic PE32+ image to exercise the actual section mapper.
+    std::vector<uint8_t> peFixture(0x400,0);
+    auto put16=[&](size_t o,uint16_t v) {
+        peFixture[o]=uint8_t(v); peFixture[o+1]=uint8_t(v>>8);
+    };
+    auto put32=[&](size_t o,uint32_t v) {
+        for(unsigned n=0;n<4;++n) peFixture[o+n]=uint8_t(v>>(n*8));
+    };
+    auto put64=[&](size_t o,uint64_t v) {
+        for(unsigned n=0;n<8;++n) peFixture[o+n]=uint8_t(v>>(n*8));
+    };
+    peFixture[0]='M'; peFixture[1]='Z'; put32(0x3c,0x80);
+    peFixture[0x80]='P'; peFixture[0x81]='E';
+    put16(0x84,0x8664); put16(0x86,1); put16(0x94,112);
+    put16(0x98,0x20b); put32(0xA8,0x1000);
+    put64(0xB0,0x10000000ULL); put32(0xB8,0x1000); put32(0xBC,0x200);
+    put32(0xD0,0x2000); put32(0xD4,0x200); put32(0x104,0);
+    peFixture[0x108]='.'; peFixture[0x109]='t'; peFixture[0x10A]='e';
+    peFixture[0x10B]='x'; peFixture[0x10C]='t';
+    put32(0x110,0x100); put32(0x114,0x1000);
+    put32(0x118,0x200); put32(0x11C,0x200);
+    put32(0x12C,0x60000020);
+    peFixture[0x200]=0x90; peFixture[0x201]=0xC3;
+    const std::string peMap=mapPeImage(peFixture);
+    const bool peMapPass=peMap.rfind("PE32+ IMAGE MAPPED INTO GUEST ADDRESS SPACE",0)==0 &&
+                         peMap.find("Guest memory regions: 2")!=std::string::npos &&
+                         peMap.find("Executable sections: 1")!=std::string::npos;
+    std::vector<uint8_t> overlappingFixture=peFixture;
+    overlappingFixture[0x114]=0x00; overlappingFixture[0x115]=0x01;
+    overlappingFixture[0x116]=0x00; overlappingFixture[0x117]=0x00;
+    const std::string overlapResult=mapPeImage(overlappingFixture);
+    const bool overlapRejected=overlapResult.find("overlapping PE sections")!=std::string::npos;
+
     bool pass=a.rfind("PASS",0)==0&&b.rfind("PASS",0)==0&&c.rfind("PASS",0)==0&&
-              d.rfind("PASS",0)==0&&vm.rfind("PASS",0)==0;
-    return std::string("ASTERPC CPU + GUEST MEMORY: ")+(pass?"ALL TESTS PASS":"TEST FAILURE")+
+              d.rfind("PASS",0)==0&&vm.rfind("PASS",0)==0&&peMapPass&&overlapRejected;
+    return std::string("ASTERPC CPU + GUEST MEMORY + PE MAPPER: ")+(pass?"ALL TESTS PASS":"TEST FAILURE")+
       "\n1 MOV/ADD: "+a+"\n2 memory store/load: "+b+"\n3 register arithmetic: "+c+"\n4 shift: "+d+
       "\n5 guest virtual memory: "+vm+
+      "\n6 PE section mapping: "+(peMapPass?"PASS: synthetic PE32+ image mapped with RX section permissions":"FAIL: "+peMap)+
+      "\n7 PE overlap guard: "+(overlapRejected?"PASS: overlapping section rejected":"FAIL: "+overlapResult)+
       "\nGuest RAM: 1 MiB, bounds-checked, little-endian; stack resides in guest RAM."+
       "\nVirtual memory prototype: isolated regions, overlap rejection, read/write/execute permissions, 256 MiB commit cap."+
       "\nInstructions: MOV, LEA, ADD, SUB, OR, AND, XOR, CMP, TEST, INC, DEC, NOT, NEG, SHL, SHR, SAR, PUSH, POP, CALL, RET, JMP, JZ, JNZ, NOP, HLT."+
