@@ -7,6 +7,7 @@
 #include <vector>
 #include <algorithm>
 #include <cctype>
+#include <utility>
 
 namespace {
 enum Reg : unsigned { RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI,
