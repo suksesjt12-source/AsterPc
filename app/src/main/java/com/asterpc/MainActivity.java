@@ -28,7 +28,8 @@ public class MainActivity extends Activity {
     static { System.loadLibrary("asterpc"); }
     private native String runSelfTest();
     private native String inspectPe(byte[] fileBytes);
-    private native String mapPeImage(byte[] fileBytes);\n    private native String runWinApiSelfTest();
+    private native String mapPeImage(byte[] fileBytes);
+    private native String runWinApiSelfTest();
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -52,7 +53,7 @@ public class MainActivity extends Activity {
 
         TextView status = new TextView(this);
         status.setText("\nStatus: prototype 0.6.0\nHost ABI: " + android.os.Build.SUPPORTED_ABIS[0]
-                + "\nCPU: experimental x86-64 interpreter\nMemory: bounded guest address-space + PE section mapping\nDLLs: import-module metadata registry\nGPU: native RGBA framebuffer + OpenGL ES 2.0");
+                + "\nCPU: experimental x86-64 interpreter\nMemory: bounded guest address-space + PE section mapping\nDLLs: import-module metadata registry\nAPI: limited Win64 dispatcher (test-only)\nGPU: native RGBA framebuffer + OpenGL ES 2.0");
         status.setTextColor(0xFFE4ECF5);
         status.setTextSize(15);
         root.addView(status);
@@ -73,6 +74,10 @@ public class MainActivity extends Activity {
         Button map = new Button(this);
         map.setText("Map PE sections into temporary guest buffer");
         root.addView(map);
+
+        Button apiTest = new Button(this);
+        apiTest.setText("Run Windows API dispatcher self-test");
+        root.addView(apiTest);
         pe.setOnClickListener(v -> { pickExecutable(); });
         map.setOnClickListener(v -> { mapRequested = true; pickExecutable(); });
 
@@ -84,7 +89,7 @@ public class MainActivity extends Activity {
         root.addView(output);
 
         TextView warning = new TextView(this);
-        warning.setText("\nImportant: PE headers and sections are mapped into a bounded guest-memory model, and imported DLL names are tracked as metadata. IAT entries remain non-callable placeholders; DLLs and Windows APIs are not executed. No Windows program can run yet. GPU output is a test framebuffer, not DirectX/Vulkan translation.");
+        warning.setText("\nImportant: PE headers and sections are mapped into a bounded guest-memory model. A small deterministic Win32 API dispatcher is available for isolated tests, but is not connected to the guest CPU or IAT. DLLs are not loaded. No Windows program can run yet. GPU output is a test framebuffer, not DirectX/Vulkan translation.");
         warning.setTextColor(0xFFFFD28A);
         warning.setTextSize(13);
         root.addView(warning);
@@ -92,6 +97,11 @@ public class MainActivity extends Activity {
         test.setOnClickListener(v -> {
             try { output.setText(runSelfTest()); }
             catch (Throwable t) { output.setText("Native test failed: " + t.getMessage()); }
+        });
+
+        apiTest.setOnClickListener(v -> {
+            try { output.setText(runWinApiSelfTest()); }
+            catch (Throwable t) { output.setText("Windows API test failed: " + t.getMessage()); }
         });
 
         ScrollView scroll = new ScrollView(this);
