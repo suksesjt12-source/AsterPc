@@ -6,6 +6,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 namespace {
 enum Reg : unsigned { RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI,
