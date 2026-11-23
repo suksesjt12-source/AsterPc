@@ -550,6 +550,7 @@ std::string selfTests() {
       "\n9 x64 IAT-style CALL [RIP+disp32] -> GetTickCount64: "+(iatCallPass?"PASS":"FAIL")+
       "\n10 CPU CALL -> SetLastError/GetLastError: "+(lastErrorCallPass?"PASS":"FAIL")+
       "\n11 CPU CALL -> ExitProcess guest stop: "+(exitCallPass?"PASS":"FAIL")+
+      "\n12 PE import resolution: "+(importResolverPass?"PASS: supported API thunk separated from unresolved import":"FAIL: "+importMap)+
       "\nGuest RAM: 1 MiB, bounds-checked, little-endian; stack resides in guest RAM."+
       "\nVirtual memory prototype: isolated regions, overlap rejection, read/write/execute permissions, 256 MiB commit cap."+
       "\nInstructions: MOV, LEA, ADD, SUB, OR, AND, XOR, CMP, TEST, INC, DEC, NOT, NEG, SHL, SHR, SAR, PUSH, POP, CALL, RET, JMP, JZ, JNZ, NOP, HLT."+
@@ -875,8 +876,9 @@ static std::string mapPeImage(const std::vector<uint8_t>& b) {
        <<"\nMapped image size: "<<image.size()<<" bytes\nSections mapped: "<<sections
        <<"\nBase relocations applied: "<<relocEntries<<" (DIR64: "<<dir64Entries
        <<", blocks: "<<relocBlocks<<")\nImport DLLs: "<<importDllCount
-       <<"\nIAT entries assigned placeholder addresses: "<<importSymbols
-       <<"\nNames matching API catalog (not executable): "<<recognizedApis
+       <<"\nIAT entries assigned addresses: "<<importSymbols
+       <<"\nCallable Win32 API thunks (subset): "<<recognizedApis
+       <<"\nUnresolved imports: "<<unresolvedImports
        <<"\nGuest memory regions: "<<guestSpace.regionCount()
        <<" ("<<guestSpace.committedBytes()<<" bytes committed)"
        <<"\nExecutable sections: "<<executableSections
