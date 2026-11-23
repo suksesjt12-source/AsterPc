@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.22.1)
+project(asterpc LANGUAGES CXX)
+add_library(asterpc SHARED asterpc.cpp)
+target_compile_features(asterpc PRIVATE cxx_std_17)
+target_compile_options(asterpc PRIVATE -O2 -Wall -Wextra)
