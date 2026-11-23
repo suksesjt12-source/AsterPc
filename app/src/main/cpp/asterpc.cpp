@@ -309,7 +309,9 @@ std::string selfTests() {
               d.rfind("PASS",0)==0&&vm.rfind("PASS",0)==0;
     return std::string("ASTERPC CPU + GUEST MEMORY: ")+(pass?"ALL TESTS PASS":"TEST FAILURE")+
       "\n1 MOV/ADD: "+a+"\n2 memory store/load: "+b+"\n3 register arithmetic: "+c+"\n4 shift: "+d+
+      "\n5 guest virtual memory: "+vm+
       "\nGuest RAM: 1 MiB, bounds-checked, little-endian; stack resides in guest RAM."+
+      "\nVirtual memory prototype: isolated regions, overlap rejection, read/write/execute permissions, 256 MiB commit cap."+
       "\nInstructions: MOV, LEA, ADD, SUB, OR, AND, XOR, CMP, TEST, INC, DEC, NOT, NEG, SHL, SHR, SAR, PUSH, POP, CALL, RET, JMP, JZ, JNZ, NOP, HLT."+
       "\nScope: experimental 64-bit subset; no hardware paging/MMU, SIMD, interrupts, privilege rings, or executable Windows API dispatcher.";
 }
