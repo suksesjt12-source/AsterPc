@@ -1,4 +1,4 @@
-# AsterPC 0.8.2
+# AsterPC 0.8.3
 
 AsterPC adalah prototipe riset emulator PC untuk Android ARM64. Proyek ini **belum dapat menjalankan aplikasi atau game Windows**.
 
@@ -31,7 +31,7 @@ Tidak semua encoding, prefix, ukuran operand, atau addressing mode x86-64 tersed
 - Registry metadata untuk nama DLL import dan jumlah simbolnya.
 - Import API yang didukung dispatcher dibedakan dari import yang belum didukung; IAT image uji diberi alamat thunk untuk enam fungsi yang tersedia.
 
-**Batasan loader:** self-test kini mengoper byte image PE sintetis dan IAT hasil pemetaan langsung ke CPU, lalu mengikat impor yang didukung ke API thunk. Bootstrap proses guest menyiapkan alamat image/entry point, stack guest terpisah, command line dan environment block UTF-16LE, serta registry image executable. DLL impor hanya dicatat sebagai metadata dan tidak benar-benar dimuat. Ini adalah process context eksperimental, bukan implementasi PEB/TEB, Windows process parameters, atau loader Windows yang kompatibel. File EXE pilihan pengguna hanya diperiksa/dipetakan; aplikasi tidak mencoba menjalankannya. TLS, process startup Windows yang nyata, enforcement permission saat instruksi berjalan, dan loader lengkap belum ada.
+**Batasan loader:** self-test kini mengoper byte image PE sintetis dan IAT hasil pemetaan langsung ke CPU, lalu mengikat impor yang didukung ke API thunk. Bootstrap proses guest menyiapkan alamat image/entry point, stack guest terpisah, command line dan environment block UTF-16LE, serta registry image executable. DLL impor hanya dicatat sebagai metadata dan tidak benar-benar dimuat. Belum ada PEB/TEB Windows yang kompatibel atau struktur process parameters Windows; data bootstrap bukan pengganti struktur tersebut. Ini adalah process context eksperimental, bukan implementasi PEB/TEB, Windows process parameters, atau loader Windows yang kompatibel. File EXE pilihan pengguna hanya diperiksa/dipetakan; aplikasi tidak mencoba menjalankannya. TLS, process startup Windows yang nyata, enforcement permission saat instruksi berjalan, dan loader lengkap belum ada.
 
 ## Limited Win32 API dispatcher
 - Dispatcher deterministik menggunakan register argumen integer Microsoft x64 (RCX, RDX, R8, R9).
@@ -55,6 +55,7 @@ Tombol **Run CPU + Windows API integration self-test** menjalankan:
 - Tes resolver import PE dengan satu thunk API didukung dan satu impor non-callable.
 - Tes runtime PE sintetis: byte image dan IAT hasil mapper dijalankan oleh CPU, lalu `CALL [RIP+disp32]` mencapai `GetTickCount64`.
 - Tes bootstrap proses guest: entry point, guest stack 16-byte aligned, command line UTF-16LE, environment block UTF-16LE, dan registry modul.
+- Validasi compile-time/runtime untuk pembacaan parameter proses pada self-test; hasil build sebelumnya gagal karena helper pembaca menerima `const Machine` meski `readMem` mencatat error pada state CPU.
 - Tes bahwa executable dicatat sebagai mapped image sementara DLL impor tetap metadata-only dan tidak berstatus loaded.
 - Tes bahwa pemanggilan IAT untuk impor yang belum didukung ditolak sebagai non-callable.
 - Tes capability lookup dispatcher: nama DLL dinormalisasi, nama export tetap exact-match, dan API/DLL yang belum didukung ditolak.
