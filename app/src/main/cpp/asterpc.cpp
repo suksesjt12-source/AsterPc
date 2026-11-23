@@ -636,7 +636,7 @@ public:
         return true;
     }
 
-    static bool wideAsciiEquals(const Machine& machine,uint64_t address,
+    static bool wideAsciiEquals(Machine& machine,uint64_t address,
                                 const std::string& expected,bool doubleNull=false) {
         for(size_t i=0;i<expected.size();++i) {
             uint64_t value=0;
