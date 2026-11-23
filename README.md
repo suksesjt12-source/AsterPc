@@ -33,6 +33,14 @@ Tidak semua encoding, prefix, ukuran operand, atau addressing mode x86-64 tersed
 
 **Batasan loader:** alamat IAT dan handle DLL masih placeholder diagnostik. DLL tidak dimuat atau dieksekusi. Windows API belum mempunyai dispatcher yang dapat dipanggil guest CPU. TLS, startup process, page-protection enforcement saat eksekusi, dan loader lengkap belum ada. PE image dipetakan hanya untuk pemeriksaan dan kemudian dibuang.
 
+## Limited Win32 API dispatcher
+- Separate deterministic dispatcher prototype using the Microsoft x64 integer argument registers (RCX, RDX, R8, R9).
+- Implemented test semantics for `GetTickCount`, `GetTickCount64`, `GetLastError`, `SetLastError`, `GetCurrentProcess`, and `ExitProcess` from `kernel32.dll`/`kernelbase.dll`.
+- Supports a virtual tick source and isolated guest last-error / exit-state fields; it does not call host Windows APIs or affect Android.
+- Includes a separate native self-test exposed by the Android UI.
+
+**Important limitation:** this dispatcher is not yet connected to the x86-64 interpreter, PE IAT entries, a guest thread scheduler, or a real Windows process. It is a call-frame model only.
+
 ## GPU
 Aplikasi menampilkan framebuffer RGBA sintetis melalui JNI dan OpenGL ES 2.0. Ini hanya pola uji, bukan output Windows, bukan penerjemah DirectX/Vulkan, dan belum terhubung ke CPU guest.
 
