@@ -34,13 +34,22 @@ struct Operand {
 struct Machine {
     Cpu cpu;
     std::vector<uint8_t> mem;
+    uint64_t memoryBase=0;
     asterpc::WinApiDispatcher apiDispatcher;
     asterpc::Win64CallFrame apiFrame;
     std::unordered_map<uint64_t,std::pair<std::string,std::string>> apiStubs;
-    explicit Machine(const std::vector<uint8_t>& program) : mem(MEMORY_SIZE,0) {
-        if(program.size()>mem.size()/2) { cpu.error="program is larger than guest memory"; return; }
+    explicit Machine(const std::vector<uint8_t>& program,
+                     uint64_t baseAddress=0,uint64_t entryAddress=0)
+        : mem(std::max<size_t>(MEMORY_SIZE,program.size()+64u*1024u)),
+          memoryBase(baseAddress) {
+        if(program.size()>128u*1024u*1024u ||
+           memoryBase>UINT64_MAX-mem.size()) {
+            cpu.error="guest image exceeds the bounded CPU memory model";
+            return;
+        }
         std::copy(program.begin(),program.end(),mem.begin());
-        cpu.r[RSP]=MEMORY_SIZE-16;
+        cpu.rip=entryAddress?entryAddress:memoryBase;
+        cpu.r[RSP]=memoryBase+mem.size()-16;
     }
     bool bindApiStub(uint64_t address,const std::string& dll,const std::string& symbol) {
         if(address<API_STUB_BASE || address-API_STUB_BASE>0x100000ULL ||
@@ -64,10 +73,16 @@ struct Machine {
         return true;
     }
     bool fail(const char* why) { cpu.error=why; return false; }
-    bool range(uint64_t a,size_t n) const { return a<=mem.size() && n<=mem.size()-static_cast<size_t>(a); }
+    bool range(uint64_t a,size_t n) const {
+        if(a<memoryBase) return false;
+        const uint64_t offset=a-memoryBase;
+        return offset<=mem.size() && n<=mem.size()-static_cast<size_t>(offset);
+    }
     bool fetch8(uint8_t& v) {
         if(!range(cpu.rip,1)) return fail("instruction fetch outside guest memory");
-        v=mem[static_cast<size_t>(cpu.rip++)]; return true;
+        v=mem[static_cast<size_t>(cpu.rip-memoryBase)];
+        ++cpu.rip;
+        return true;
     }
     bool fetchN(uint64_t& v,unsigned n) {
         if(!range(cpu.rip,n)) return fail("truncated instruction immediate");
@@ -76,12 +91,14 @@ struct Machine {
     }
     bool readMem(uint64_t a,unsigned n,uint64_t& v) {
         if(!range(a,n)) return fail("guest memory read out of bounds");
-        v=0; for(unsigned i=0;i<n;i++) v|=uint64_t(mem[static_cast<size_t>(a)+i])<<(i*8);
+        const size_t offset=static_cast<size_t>(a-memoryBase);
+        v=0; for(unsigned i=0;i<n;i++) v|=uint64_t(mem[offset+i])<<(i*8);
         return true;
     }
     bool writeMem(uint64_t a,unsigned n,uint64_t v) {
         if(!range(a,n)) return fail("guest memory write out of bounds");
-        for(unsigned i=0;i<n;i++) mem[static_cast<size_t>(a)+i]=uint8_t(v>>(i*8));
+        const size_t offset=static_cast<size_t>(a-memoryBase);
+        for(unsigned i=0;i<n;i++) mem[offset+i]=uint8_t(v>>(i*8));
         return true;
     }
     uint64_t readOp(const Operand& o,unsigned n) {
@@ -139,7 +156,9 @@ struct Machine {
     }
     bool branch(int64_t rel) {
         int64_t dest=static_cast<int64_t>(cpu.rip)+rel;
-        if(dest<0 || static_cast<uint64_t>(dest)>=mem.size()) return fail("branch target outside guest memory");
+        if(dest<0 || static_cast<uint64_t>(dest)<memoryBase ||
+           static_cast<uint64_t>(dest)-memoryBase>=mem.size())
+            return fail("branch target outside guest memory");
         cpu.rip=static_cast<uint64_t>(dest); return true;
     }
     bool run(uint64_t limit=DEFAULT_STEP_LIMIT) {
@@ -172,7 +191,7 @@ struct Machine {
                 if(take) { uint64_t ret=cpu.rip; if(op==0xE8&&!push(ret)) return false; if(!branch(rel)) return false; }
                 continue;
             }
-            if(op==0xC3) { uint64_t dest; if(!pop(dest)) return false; if(dest>=mem.size()) return fail("RET target outside guest memory"); cpu.rip=dest; continue; }
+            if(op==0xC3) { uint64_t dest; if(!pop(dest)) return false; if(dest<memoryBase || dest-memoryBase>=mem.size()) return fail("RET target outside guest memory"); cpu.rip=dest; continue; }
 
             if(op==0x89||op==0x8B||op==0x01||op==0x03||op==0x29||op==0x2B||
                op==0x31||op==0x33||op==0x39||op==0x3B||op==0x85||op==0x8D) {
@@ -216,7 +235,7 @@ struct Machine {
                         if(!invokeApiStub(target)) return false;
                         continue;
                     }
-                    if(target>=mem.size())
+                    if(target<memoryBase || target-memoryBase>=mem.size())
                         return fail("indirect CALL target is neither guest code nor a registered API thunk");
                     const uint64_t returnAddress=cpu.rip;
                     if(!push(returnAddress)) return false;
@@ -417,7 +436,22 @@ static std::string guestMemorySelfTest() {
     return "PASS: region mapping, overlap guard, permissions, bounds, and DLL registry";
 }
 
-static std::string mapPeImage(const std::vector<uint8_t>& b);
+struct PeImportBinding {
+    std::string dll;
+    std::string symbol;
+    uint64_t iatAddress=0;
+    uint64_t stubAddress=0;
+    bool supported=false;
+};
+
+struct PeRuntimeImage {
+    std::vector<uint8_t> bytes;
+    uint64_t loadBase=0;
+    uint32_t entryRva=0;
+    std::vector<PeImportBinding> imports;
+};
+
+static std::string mapPeImage(const std::vector<uint8_t>& b,PeRuntimeImage* runtime=nullptr);
 
 std::string selfTests() {
     const std::vector<uint8_t> basic={0x48,0xB8,42,0,0,0,0,0,0,0,0x48,0x83,0xC0,8,0xF4};
@@ -513,7 +547,7 @@ std::string selfTests() {
     importFixture[0]='M'; importFixture[1]='Z'; i32(0x3c,0x80);
     importFixture[0x80]='P'; importFixture[0x81]='E';
     i16(0x84,0x8664); i16(0x86,1); i16(0x94,128);
-    i16(0x98,0x20b); i32(0xA8,0x1000); i64(0xB0,0x10000000ULL);
+    i16(0x98,0x20b); i32(0xA8,0x1200); i64(0xB0,0x10000000ULL);
     i32(0xB8,0x1000); i32(0xBC,0x200); i32(0xD0,0x2000);
     i32(0xD4,0x200); i32(0x104,2);
     i32(0x110,0x1100); i32(0x114,40);
@@ -530,17 +564,45 @@ std::string selfTests() {
     std::memcpy(importFixture.data()+0x380,dllName,std::strlen(dllName)+1);
     i16(0x3A0,0); std::memcpy(importFixture.data()+0x3A2,"GetTickCount64",15);
     i16(0x3B0,0); std::memcpy(importFixture.data()+0x3B2,"GetModuleHandleA",17);
-    importFixture[0x400]=0x90; importFixture[0x401]=0xC3;
-    const std::string importMap=mapPeImage(importFixture);
+    // Entry RVA 0x1200 calls through the IAT at RVA 0x1160, then halts.
+    const uint8_t peRuntimeCode[]={0xFF,0x15,0x5A,0xFF,0xFF,0xFF,0xF4};
+    std::memcpy(importFixture.data()+0x400,peRuntimeCode,sizeof(peRuntimeCode));
+    PeRuntimeImage runtimeImage;
+    const std::string importMap=mapPeImage(importFixture,&runtimeImage);
     const bool importResolverPass=
         importMap.find("Callable Win32 API thunks (subset): 1")!=std::string::npos &&
         importMap.find("Unresolved imports: 1")!=std::string::npos &&
         importMap.find("GetTickCount64 -> callable Win32 API thunk")!=std::string::npos &&
-        importMap.find("GetModuleHandleA -> unresolved non-callable placeholder")!=std::string::npos;
+        importMap.find("GetModuleHandleA -> unresolved non-callable placeholder")!=std::string::npos &&
+        runtimeImage.imports.size()==2 && runtimeImage.entryRva==0x1200;
+
+    Machine peRuntimeMachine(runtimeImage.bytes,runtimeImage.loadBase,
+                             runtimeImage.loadBase+runtimeImage.entryRva);
+    bool peBindingsReady=importResolverPass;
+    for(const auto& binding:runtimeImage.imports) {
+        if(binding.supported)
+            peBindingsReady=peRuntimeMachine.bindApiStub(binding.stubAddress,
+                                                         binding.dll,binding.symbol) && peBindingsReady;
+    }
+    constexpr uint64_t PE_TEST_TICKS=0x123456789ABCULL;
+    peRuntimeMachine.apiFrame.virtualMilliseconds=PE_TEST_TICKS;
+    const bool peRuntimeCallPass=peBindingsReady && peRuntimeMachine.run() &&
+                                 peRuntimeMachine.cpu.r[RAX]==PE_TEST_TICKS;
+
+    std::vector<uint8_t> unsupportedPeBytes=runtimeImage.bytes;
+    const uint8_t unsupportedCall[]={0xFF,0x15,0x62,0xFF,0xFF,0xFF,0xF4};
+    if(unsupportedPeBytes.size()>=0x1200+sizeof(unsupportedCall))
+        std::memcpy(unsupportedPeBytes.data()+0x1200,unsupportedCall,sizeof(unsupportedCall));
+    Machine unsupportedPeMachine(unsupportedPeBytes,runtimeImage.loadBase,
+                                 runtimeImage.loadBase+runtimeImage.entryRva);
+    const bool unsupportedImportRejected=
+        !unsupportedPeMachine.run() &&
+        unsupportedPeMachine.cpu.error.find("neither guest code nor a registered API thunk")!=std::string::npos;
 
     bool pass=a.rfind("PASS",0)==0&&b.rfind("PASS",0)==0&&c.rfind("PASS",0)==0&&
               d.rfind("PASS",0)==0&&vm.rfind("PASS",0)==0&&peMapPass&&overlapRejected&&
-              apiCallPass&&iatCallPass&&lastErrorCallPass&&exitCallPass&&importResolverPass;
+              apiCallPass&&iatCallPass&&lastErrorCallPass&&exitCallPass&&importResolverPass&&
+              peRuntimeCallPass&&unsupportedImportRejected;
     return std::string("ASTERPC CPU + WIN32 THUNKS + GUEST MEMORY + PE MAPPER: ")+(pass?"ALL TESTS PASS":"TEST FAILURE")+
       "\n1 MOV/ADD: "+a+"\n2 memory store/load: "+b+"\n3 register arithmetic: "+c+"\n4 shift: "+d+
       "\n5 guest virtual memory: "+vm+
@@ -551,7 +613,10 @@ std::string selfTests() {
       "\n10 CPU CALL -> SetLastError/GetLastError: "+(lastErrorCallPass?"PASS":"FAIL")+
       "\n11 CPU CALL -> ExitProcess guest stop: "+(exitCallPass?"PASS":"FAIL")+
       "\n12 PE import resolution: "+(importResolverPass?"PASS: supported API thunk separated from unresolved import":"FAIL: "+importMap)+
-      "\nGuest RAM: 1 MiB, bounds-checked, little-endian; stack resides in guest RAM."+
+      "\n13 mapped PE IAT -> CPU CALL -> GetTickCount64: "+(peRuntimeCallPass?"PASS":"FAIL")+
+      "\n14 unsupported PE IAT import remains non-callable: "+(unsupportedImportRejected?"PASS":"FAIL")+
+      "\nGuest RAM: 1 MiB minimum, bounds-checked, little-endian; stack resides in guest RAM."+
+      "\nPE runtime test: mapped PE image bytes and IAT are consumed directly by the experimental CPU; supported imports bind to deterministic API thunks."+
       "\nVirtual memory prototype: isolated regions, overlap rejection, read/write/execute permissions, 256 MiB commit cap."+
       "\nInstructions: MOV, LEA, ADD, SUB, OR, AND, XOR, CMP, TEST, INC, DEC, NOT, NEG, SHL, SHR, SAR, PUSH, POP, CALL, RET, JMP, JZ, JNZ, NOP, HLT."+
       "\nScope: experimental 64-bit subset; API calls use registered test thunks only. No complete PE-to-runtime loader, hardware paging/MMU, SIMD, interrupts, or broad Win32 compatibility.";
@@ -664,7 +729,8 @@ Java_com_asterpc_MainActivity_inspectPe(JNIEnv* env, jobject, jbyteArray input) 
 
 
 namespace {
-static std::string mapPeImage(const std::vector<uint8_t>& b) {
+static std::string mapPeImage(const std::vector<uint8_t>& b,PeRuntimeImage* runtime) {
+    if(runtime) { runtime->bytes.clear(); runtime->imports.clear(); runtime->loadBase=0; runtime->entryRva=0; }
     if (b.size()<64 || b[0]!='M' || b[1]!='Z') return "INVALID: DOS MZ signature not found.";
     uint32_t peOff;
     if (!peRead32(b,0x3c,peOff) || size_t(peOff)>b.size() || b.size()-size_t(peOff)<24)
@@ -770,6 +836,7 @@ static std::string mapPeImage(const std::vector<uint8_t>& b) {
     // Imports are parsed and IAT entries receive non-executable placeholder thunk addresses.
     // These addresses are diagnostic only; no DLL or Windows API is invoked.
     std::vector<std::string> importDetails;
+    std::vector<PeImportBinding> runtimeImports;
     uint32_t importSymbols=0,importDllCount=0,recognizedApis=0,unresolvedImports=0;
     GuestModuleRegistry moduleRegistry;
     constexpr uint64_t importStubBase=API_STUB_BASE;
@@ -833,6 +900,7 @@ static std::string mapPeImage(const std::vector<uint8_t>& b) {
                     ? importStubBase+uint64_t(recognizedApis-1)*16
                     : unresolvedStubBase+uint64_t(unresolvedImports)*16;
                 for(unsigned n=0;n<8;++n) image[static_cast<size_t>(dst)+n]=uint8_t(stub>>(n*8));
+                runtimeImports.push_back({dll,symbol,guestLoadBase+dst,stub,known});
                 if(importDetails.size()<64)
                     importDetails.push_back("  "+symbol+" -> "+
                         (known?"callable Win32 API thunk":"unresolved non-callable placeholder"));
@@ -888,9 +956,15 @@ static std::string mapPeImage(const std::vector<uint8_t>& b) {
     for(const auto& detail:importDetails) out<<"  "<<detail<<"\n";
     out<<"BSS/uninitialized bytes: zero-filled\n"
        <<"Headers and sections were copied into bounded guest address-space regions.\n"
-       <<"Module records and API names are metadata only; diagnostic handles and IAT placeholders are not callable.\n"
-       <<"No PE entry point was executed and no Windows application was launched.\n"
-       <<"Not implemented: automatic execution of this mapped image, real DLL loading, TLS, process startup, and full Win32 compatibility.";
+       <<"Supported IAT entries can be bound to the deterministic CPU API dispatcher; unsupported entries remain non-callable.\n"
+       <<"This mapper prepares an image for controlled tests; user-selected PE files are not launched.\n"
+       <<"Not implemented: real DLL loading, TLS, process startup, Windows subsystem services, and full Win32 compatibility.";
+    if(runtime) {
+        runtime->bytes=std::move(image);
+        runtime->loadBase=guestLoadBase;
+        runtime->entryRva=entry;
+        runtime->imports=std::move(runtimeImports);
+    }
     return out.str();
 }
 
