@@ -7,7 +7,7 @@ AsterPC adalah prototipe riset emulator PC untuk Android ARM64. Proyek ini **bel
 - Interpreter x86-64 eksperimental dengan 16 register general-purpose 64-bit.
 - Guest RAM linear 1 MiB dengan pemeriksaan batas dan operasi little-endian.
 - Stack CPU menggunakan guest RAM.
-- Decode ModRM dasar, displacement, dan SIB untuk operand register/memori.
+- Decode ModRM dasar, displacement, SIB, dan RIP-relative untuk operand register/memori.
 - Flags dasar: ZF, SF, CF, OF.
 - Batas eksekusi instruksi untuk mencegah loop tak terbatas.
 - Instruksi yang tersedia masih berupa subset eksperimental: MOV, LEA, ADD, SUB, OR, AND, XOR, CMP, TEST, INC, DEC, NOT, NEG, SHL, SHR, SAR, PUSH, POP, CALL, RET, JMP, JZ, JNZ, NOP, HLT.
@@ -39,7 +39,7 @@ Tidak semua encoding, prefix, ukuran operand, atau addressing mode x86-64 tersed
 - Menggunakan waktu virtual dan status last-error/exit guest; tidak memanggil Windows API host atau memengaruhi Android.
 - Menyediakan self-test native terpisah melalui UI Android.
 
-**Integration status:** the x86-64 interpreter can now execute indirect `CALL r/m64` instructions targeting explicitly registered API thunk addresses. The bridge transfers `RCX`, `RDX`, `R8`, and `R9`, returns API results through `RAX`, and turns `ExitProcess` into a guest stop request. Self-tests cover `GetTickCount64`, `SetLastError`/`GetLastError`, and `ExitProcess`. The PE parser still writes diagnostic placeholder addresses rather than automatically registering each imported API; this is not yet a complete PE runtime or Windows process.
+**Integration status:** the x86-64 interpreter can now execute indirect `CALL r/m64` instructions targeting explicitly registered API thunk addresses. The bridge transfers `RCX`, `RDX`, `R8`, and `R9`, returns API results through `RAX`, and turns `ExitProcess` into a guest stop request. Self-tests cover `GetTickCount64` through both `CALL RAX` and IAT-style `CALL [RIP+disp32]`, `SetLastError`/`GetLastError`, and `ExitProcess`. The PE parser still writes diagnostic placeholder addresses rather than automatically registering each imported API; this is not yet a complete PE runtime or Windows process.
 
 ## GPU
 Aplikasi menampilkan framebuffer RGBA sintetis melalui JNI dan OpenGL ES 2.0. Ini hanya pola uji, bukan output Windows, bukan penerjemah DirectX/Vulkan, dan belum terhubung ke CPU guest.
@@ -50,7 +50,8 @@ Tombol **Run CPU + Windows API integration self-test** menjalankan:
 - Tes pemetaan region, akses permission, dan penolakan overlap.
 - Tes registry DLL metadata dan deduplikasi nama yang tidak peka huruf besar/kecil.
 - Tes smoke PE32+ sintetis dan penolakan section overlap.
-- Tes CPU indirect `CALL` ke thunk `GetTickCount64`.
+- Tes CPU indirect `CALL RAX` ke thunk `GetTickCount64`.
+- Tes RIP-relative `CALL [RIP+disp32]` terhadap slot IAT sintetis.
 - Tes alur `SetLastError` lalu `GetLastError` melalui register CPU.
 - Tes `ExitProcess` menghentikan eksekusi guest dengan exit code yang diminta.
 
