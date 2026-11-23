@@ -142,7 +142,7 @@ struct Machine {
                 uint8_t m; if(!fetch8(m)) return false;
                 Operand rm; unsigned reg; if(!decodeRM(m,rex,rm,reg)) return false;
                 if(op==0x8D) { if(rm.isReg) return fail("LEA requires a memory addressing form"); cpu.r[reg]=rm.address; continue; }
-                uint64_t a=readOp(rm,width), b=cpu.r[reg], t;
+                uint64_t a=readOp(rm,width), b=cpu.r[reg], t; if(!cpu.error.empty()) return false;
                 if(op==0x89) { if(!writeOp(rm,width,b)) return false; }
                 else if(op==0x8B) cpu.r[reg]=a;
                 else if(op==0x01) { t=a; doAdd(t,b); if(!writeOp(rm,width,t)) return false; }
@@ -170,16 +170,16 @@ struct Machine {
                 }
                 if(op==0xF7 && group==0) {
                     uint64_t imm; if(!fetchN(imm,4)) return false;
-                    uint64_t x=readOp(rm,8); setLogic(x & static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(imm)))); continue;
+                    uint64_t x=readOp(rm,8); if(!cpu.error.empty()) return false; setLogic(x & static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(imm)))); continue;
                 }
                 if(op==0xFF && (group==0||group==1)) {
-                    uint64_t x=readOp(rm,8), old=x;
+                    uint64_t x=readOp(rm,8), old=x; if(!cpu.error.empty()) return false;
                     if(group==0) doAdd(x,1); else doSub(x,1);
                     cpu.cf=(group==0)?(old==UINT64_MAX):(old==0);
                     if(!writeOp(rm,8,x)) return false; continue;
                 }
                 if(op==0xF7 && group==2) { uint64_t x=~readOp(rm,8); if(!writeOp(rm,8,x)) return false; continue; }
-                if(op==0xF7 && group==3) { uint64_t x=readOp(rm,8); doSub(x,0); x=0-x; if(!writeOp(rm,8,x)) return false; continue; }
+                if(op==0xF7 && group==3) { uint64_t x=readOp(rm,8); if(!cpu.error.empty()) return false; doSub(x,0); x=0-x; if(!writeOp(rm,8,x)) return false; continue; }
                 uint64_t imm=0;
                 if(op==0x81) { if(!fetchN(imm,4)) return false; int32_t x; uint32_t q=uint32_t(imm); std::memcpy(&x,&q,4); imm=static_cast<uint64_t>(static_cast<int64_t>(x)); }
                 else if(op==0x83) { uint8_t q; if(!fetch8(q)) return false; imm=static_cast<uint64_t>(static_cast<int64_t>(static_cast<int8_t>(q))); }
@@ -187,7 +187,7 @@ struct Machine {
                 else if(op==0xD1) imm=1;
                 else if(op==0xD3) imm=cpu.r[RCX]&0xFF;
                 else return fail("unsupported unary or group instruction");
-                uint64_t x=readOp(rm,8), result=x;
+                uint64_t x=readOp(rm,8), result=x; if(!cpu.error.empty()) return false;
                 if(op==0xC1||op==0xD1||op==0xD3) {
                     unsigned count=static_cast<unsigned>(imm)&63;
                     if(group==4||group==6) result=x<<count;
