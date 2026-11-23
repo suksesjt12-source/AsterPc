@@ -51,8 +51,8 @@ public class MainActivity extends Activity {
         root.addView(subtitle);
 
         TextView status = new TextView(this);
-        status.setText("\nStatus: prototype 0.5.0\nHost ABI: " + android.os.Build.SUPPORTED_ABIS[0]
-                + "\nCPU: experimental x86-64 interpreter\nMemory: bounded guest address-space prototype\nGPU: native RGBA framebuffer + OpenGL ES 2.0");
+        status.setText("\nStatus: prototype 0.6.0\nHost ABI: " + android.os.Build.SUPPORTED_ABIS[0]
+                + "\nCPU: experimental x86-64 interpreter\nMemory: bounded guest address-space + PE section mapping\nDLLs: import-module metadata registry\nGPU: native RGBA framebuffer + OpenGL ES 2.0");
         status.setTextColor(0xFFE4ECF5);
         status.setTextSize(15);
         root.addView(status);
@@ -84,7 +84,7 @@ public class MainActivity extends Activity {
         root.addView(output);
 
         TextView warning = new TextView(this);
-        warning.setText("\nImportant: PE mapping and import recognition are diagnostic prototypes. IAT addresses are placeholders; Windows APIs and DLLs are not executed. No Windows program can run yet. GPU output is a test framebuffer, not DirectX/Vulkan translation.");
+        warning.setText("\nImportant: PE headers and sections are mapped into a bounded guest-memory model, and imported DLL names are tracked as metadata. IAT entries remain non-callable placeholders; DLLs and Windows APIs are not executed. No Windows program can run yet. GPU output is a test framebuffer, not DirectX/Vulkan translation.");
         warning.setTextColor(0xFFFFD28A);
         warning.setTextSize(13);
         root.addView(warning);
