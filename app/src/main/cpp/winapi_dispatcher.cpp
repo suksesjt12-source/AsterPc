@@ -79,7 +79,7 @@ std::string runWinApiDispatcherSelfTests() {
           result.status==DispatchStatus::Returned && result.value==0x100000005ULL);
 
     result=dispatcher.dispatch("kernel32.dll","GetLastError",frame);
-    check("GetLastError returns thread-context last-error value",
+    check("GetLastError returns guest last-error state",
           result.status==DispatchStatus::Returned && result.value==87);
 
     frame.rcx=1234;
